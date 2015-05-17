@@ -265,6 +265,9 @@ int main(int argc, char *argv[])
     SDL_GL_CreateContext(wnd);
 
 
+    glext.init();
+
+
     texture input(argv[1]);
 
     vertex_array *quad = new vertex_array;
@@ -290,10 +293,13 @@ int main(int argc, char *argv[])
     draw_tex_prg.bind_attrib("in_pos", 0);
     draw_tex_prg.bind_frag("out_col", 0);
 
-    program draw_oit1_prg {shader(shader::VERTEX,   "draw_oit1_vert.glsl"),
-                           shader(shader::FRAGMENT, "draw_oit1_frag.glsl")};
-    draw_oit1_prg.bind_attrib("in_pos", 0);
-    draw_oit1_prg.bind_frag("out_col", 0);
+    program *draw_oit1_prg = nullptr;
+    if (glext.has_extension("GL_ARB_shader_image_load_store")) {
+        draw_oit1_prg = new program {shader(shader::VERTEX,   "draw_oit1_vert.glsl"),
+                                     shader(shader::FRAGMENT, "draw_oit1_frag.glsl")};
+        draw_oit1_prg->bind_attrib("in_pos", 0);
+        draw_oit1_prg->bind_frag("out_col", 0);
+    }
 
     shader *simple_vsh = new shader(shader::VERTEX, "draw_xf_vert.glsl");
 
@@ -302,13 +308,21 @@ int main(int argc, char *argv[])
     program draw_dp_prg     {shader(shader::FRAGMENT, "draw_dp_frag.glsl")};
     program draw_bfdp_prg   {shader(shader::FRAGMENT, "draw_bfdp_frag.glsl")};
     program draw_ffdp_prg   {shader(shader::FRAGMENT, "draw_ffdp_frag.glsl")};
-    program draw_oit0_prg   {shader(shader::FRAGMENT, "draw_oit0_frag.glsl")};
     program draw_simple_prg {shader(shader::FRAGMENT, "draw_simple_frag.glsl")};
 
+    program *draw_oit0_prg = nullptr;
+    if (glext.has_extension("GL_ARB_shader_image_load_store")) {
+        draw_oit0_prg = new program {shader(shader::FRAGMENT, "draw_oit0_frag.glsl")};
+    }
+
     for (program *prg: {&draw_bf_prg, &draw_ff_prg, &draw_dp_prg,
-                        &draw_bfdp_prg, &draw_ffdp_prg, &draw_oit0_prg,
-                        &draw_simple_prg})
+                        &draw_bfdp_prg, &draw_ffdp_prg, &draw_simple_prg,
+                        draw_oit0_prg})
     {
+        if (!prg) {
+            continue;
+        }
+
         *prg << *simple_vsh;
         prg->bind_attrib("in_pos", 0);
         prg->bind_attrib("in_nrm", 1);
@@ -472,8 +486,10 @@ int main(int argc, char *argv[])
                 break;
 
             case OIT_LL:
-                oit_ll(mvp, draw_oit0_prg, draw_oit1_prg, oit_ll_head,
-                       oit_list_data, .5f, *cur_obj, cur_draw_mode, quad);
+                if (draw_oit0_prg && draw_oit1_prg) {
+                    oit_ll(mvp, *draw_oit0_prg, *draw_oit1_prg, oit_ll_head,
+                           oit_list_data, .5f, *cur_obj, cur_draw_mode, quad);
+                }
                 break;
 
             case SS_REFRACT:
