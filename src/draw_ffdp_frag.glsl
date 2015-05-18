@@ -9,18 +9,14 @@ uniform sampler2D fb, depth;
 uniform mat3 mat_nrp;
 
 
-#define EPSILON 0.0001
-
-
 void main(void)
 {
-    vec2 straight = vf_pos.xy;
-    vec2 refractd = straight - 0.05 * normalize(mat_nrp * vf_nrm).xy;
+    vec2 refractd = vf_pos.xy - 0.05 * normalize(mat_nrp * vf_nrm).xy;
 
-    float sd = texture(depth, straight).r;
+    float sd = texelFetch(depth, ivec2(gl_FragCoord.xy), 0).r;
     float rd = texture(depth, refractd).r;
 
-    if (sd < vf_pos.z + EPSILON) {
+    if (sd <= gl_FragCoord.z) {
         discard;
     }
 
