@@ -186,10 +186,10 @@ static void simple_draw(const mat4 &mvp, program &prg, float alpha,
 }
 
 
-static void oit_ll(const mat4 &mvp, program &oit0_prg, program &oit1_prg,
-                   texture &head, texture &list, float alpha,
-                   const std::vector<ObjectSection> &sections,
-                   GLenum draw_mode, vertex_array *quad_va)
+static void abuffer_ll(const mat4 &mvp, program &abuf0_prg, program &abuf1_prg,
+                       texture &head, texture &list, float alpha,
+                       const std::vector<ObjectSection> &sections,
+                       GLenum draw_mode, vertex_array *quad_va)
 {
     static GLuint atomic_counter_buffer;
 
@@ -213,14 +213,14 @@ static void oit_ll(const mat4 &mvp, program &oit0_prg, program &oit1_prg,
 
     glColorMask(false, false, false, false);
 
-    oit0_prg.use();
-    oit0_prg.uniform<int32_t>("head") = 0;
-    oit0_prg.uniform<int32_t>("list") = 1;
-    oit0_prg.uniform<mat4>("mat_mvp") = mvp;
+    abuf0_prg.use();
+    abuf0_prg.uniform<int32_t>("head") = 0;
+    abuf0_prg.uniform<int32_t>("list") = 1;
+    abuf0_prg.uniform<mat4>("mat_mvp") = mvp;
     for (const ObjectSection &sec: sections) {
         vec4 rgba = alpha * sec.color;
         rgba.a() = alpha;
-        oit0_prg.uniform<vec4>("color") = rgba;
+        abuf0_prg.uniform<vec4>("color") = rgba;
         sec.va->draw(draw_mode);
     }
 
@@ -233,9 +233,9 @@ static void oit_ll(const mat4 &mvp, program &oit0_prg, program &oit1_prg,
     glBindImageTexture(1, list.glid(), 0, false, 0, GL_READ_ONLY, GL_RGBA32UI);
 
     head.bind();
-    oit1_prg.use();
-    oit1_prg.uniform<int32_t>("head") = 0;
-    oit1_prg.uniform<int32_t>("list") = 1;
+    abuf1_prg.use();
+    abuf1_prg.uniform<int32_t>("head") = 0;
+    abuf1_prg.uniform<int32_t>("list") = 1;
     quad_va->draw(GL_TRIANGLE_STRIP);
 
     glBindImageTexture(0, 0, 0, false, 0, 0, GL_R32UI);
@@ -281,11 +281,11 @@ int main(int argc, char *argv[])
     quad->attrib(0)->data(quad_vertex_positions);
 
 
-    texture oit_ll_head, oit_list_data;
-    oit_ll_head.format(GL_R32UI, WIDTH, HEIGHT, GL_RED_INTEGER, GL_UNSIGNED_INT);
-    oit_list_data.format(GL_RGBA32UI, 2048, 2048, GL_RGBA_INTEGER, GL_UNSIGNED_INT);
+    texture abuf_ll_head, abuf_list_data;
+    abuf_ll_head.format(GL_R32UI, WIDTH, HEIGHT, GL_RED_INTEGER, GL_UNSIGNED_INT);
+    abuf_list_data.format(GL_RGBA32UI, 2048, 2048, GL_RGBA_INTEGER, GL_UNSIGNED_INT);
 
-    oit_list_data.tmu() = 1;
+    abuf_list_data.tmu() = 1;
 
 
     program draw_tex_prg {shader(shader::VERTEX,   "draw_tex_vert.glsl"),
@@ -293,12 +293,12 @@ int main(int argc, char *argv[])
     draw_tex_prg.bind_attrib("in_pos", 0);
     draw_tex_prg.bind_frag("out_col", 0);
 
-    program *draw_oit1_prg = nullptr;
+    program *draw_abuf1_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
-        draw_oit1_prg = new program {shader(shader::VERTEX,   "draw_oit1_vert.glsl"),
-                                     shader(shader::FRAGMENT, "draw_oit1_frag.glsl")};
-        draw_oit1_prg->bind_attrib("in_pos", 0);
-        draw_oit1_prg->bind_frag("out_col", 0);
+        draw_abuf1_prg = new program {shader(shader::VERTEX,   "draw_abuf1_vert.glsl"),
+                                      shader(shader::FRAGMENT, "draw_abuf1_frag.glsl")};
+        draw_abuf1_prg->bind_attrib("in_pos", 0);
+        draw_abuf1_prg->bind_frag("out_col", 0);
     }
 
     shader *simple_vsh = new shader(shader::VERTEX, "draw_xf_vert.glsl");
@@ -310,14 +310,14 @@ int main(int argc, char *argv[])
     program draw_ffdp_prg   {shader(shader::FRAGMENT, "draw_ffdp_frag.glsl")};
     program draw_simple_prg {shader(shader::FRAGMENT, "draw_simple_frag.glsl")};
 
-    program *draw_oit0_prg = nullptr;
+    program *draw_abuf0_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
-        draw_oit0_prg = new program {shader(shader::FRAGMENT, "draw_oit0_frag.glsl")};
+        draw_abuf0_prg = new program {shader(shader::FRAGMENT, "draw_abuf0_frag.glsl")};
     }
 
     for (program *prg: {&draw_bf_prg, &draw_ff_prg, &draw_dp_prg,
                         &draw_bfdp_prg, &draw_ffdp_prg, &draw_simple_prg,
-                        draw_oit0_prg})
+                        draw_abuf0_prg})
     {
         if (!prg) {
             continue;
@@ -386,7 +386,7 @@ int main(int argc, char *argv[])
     enum Mode {
         BLEND_ALPHA,
         BLEND_ALPHA_DP,
-        OIT_LL,
+        ABUFFER_LL,
         SS_REFRACT,
         SS_REFRACT_DP,
         BLEND_ADD,
@@ -485,10 +485,11 @@ int main(int argc, char *argv[])
                 blend_alpha_dp(fbs, mvp, draw_dp_prg, .5f, *cur_obj, cur_draw_mode);
                 break;
 
-            case OIT_LL:
-                if (draw_oit0_prg && draw_oit1_prg) {
-                    oit_ll(mvp, *draw_oit0_prg, *draw_oit1_prg, oit_ll_head,
-                           oit_list_data, .5f, *cur_obj, cur_draw_mode, quad);
+            case ABUFFER_LL:
+                if (draw_abuf0_prg && draw_abuf1_prg) {
+                    abuffer_ll(mvp, *draw_abuf0_prg, *draw_abuf1_prg, abuf_ll_head,
+                               abuf_list_data, .5f, *cur_obj, cur_draw_mode,
+                               quad);
                 }
                 break;
 
