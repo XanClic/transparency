@@ -9,12 +9,9 @@ uniform sampler2D fb, depth;
 uniform mat3 mat_nrp;
 
 
-#define EPSILON 0.0001
-
-
 void main(void)
 {
-    if (texture(depth, vf_pos.xy).r < vf_pos.z + EPSILON) {
+    if (texelFetch(depth, ivec2(gl_FragCoord.xy), 0).r <= gl_FragCoord.z) {
         discard;
     }
 
