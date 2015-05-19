@@ -245,6 +245,33 @@ static void abuffer_ll(const mat4 &mvp, program &abuf0_prg, program &abuf1_prg,
 }
 
 
+static void blend_meshkin(framebuffer *fbs, const mat4 &mvp, program &prg,
+                          float alpha,
+                          const std::vector<ObjectSection> &sections,
+                          GLenum draw_mode)
+{
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+
+    fbs[0][0].bind();
+
+    prg.use();
+    prg.uniform<texture>("fb") = fbs[0][0];
+    prg.uniform<mat4>("mat_mvp") = mvp;
+    for (const ObjectSection &sec: sections) {
+        vec4 rgba = alpha * sec.color;
+        rgba.a() = alpha;
+        prg.uniform<vec4>("color") = rgba;
+        sec.va->draw(draw_mode);
+    }
+
+    glDisable(GL_BLEND);
+
+    framebuffer::unbind();
+    fbs[1].blit(0, 0, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT);
+}
+
+
 int main(int argc, char *argv[])
 {
     if (argc < 2) {
@@ -309,6 +336,7 @@ int main(int argc, char *argv[])
     program draw_bfdp_prg   {shader(shader::FRAGMENT, "draw_bfdp_frag.glsl")};
     program draw_ffdp_prg   {shader(shader::FRAGMENT, "draw_ffdp_frag.glsl")};
     program draw_simple_prg {shader(shader::FRAGMENT, "draw_simple_frag.glsl")};
+    program draw_meshk_prg  {shader(shader::FRAGMENT, "draw_meshk_frag.glsl")};
 
     program *draw_abuf0_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
@@ -317,7 +345,7 @@ int main(int argc, char *argv[])
 
     for (program *prg: {&draw_bf_prg, &draw_ff_prg, &draw_dp_prg,
                         &draw_bfdp_prg, &draw_ffdp_prg, &draw_simple_prg,
-                        draw_abuf0_prg})
+                        &draw_meshk_prg, draw_abuf0_prg})
     {
         if (!prg) {
             continue;
@@ -387,6 +415,7 @@ int main(int argc, char *argv[])
         BLEND_ALPHA,
         BLEND_ALPHA_DP,
         ABUFFER_LL,
+        BLEND_MESHKIN,
         SS_REFRACT,
         SS_REFRACT_DP,
         BLEND_ADD,
@@ -417,7 +446,9 @@ int main(int argc, char *argv[])
                 switch (event.key.keysym.sym) {
                     case SDLK_SPACE:
                         mode = static_cast<Mode>((static_cast<int>(mode) + 1) % MODE_MAX);
-                        need_fbs = mode == BLEND_ALPHA_DP || mode == SS_REFRACT || mode == SS_REFRACT_DP;
+                        need_fbs = mode == BLEND_ALPHA_DP
+                                || mode == BLEND_MESHKIN || mode == SS_REFRACT
+                                || mode == SS_REFRACT_DP;
                         break;
 
                     case SDLK_RETURN:
@@ -491,6 +522,10 @@ int main(int argc, char *argv[])
                                abuf_list_data, .5f, *cur_obj, cur_draw_mode,
                                quad);
                 }
+                break;
+
+            case BLEND_MESHKIN:
+                blend_meshkin(fbs, mvp, draw_meshk_prg, .5f, *cur_obj, cur_draw_mode);
                 break;
 
             case SS_REFRACT:
