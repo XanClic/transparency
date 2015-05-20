@@ -305,6 +305,56 @@ static void blend_bamy(framebuffer &fb_in, framebuffer &fb_bamy,
 }
 
 
+static void blend_bamc(framebuffer &fb_in, framebuffer &fb_bamc,
+                       const mat4 &mv, const mat4 &proj, program &prg_draw,
+                       program &prg_resolve, float alpha,
+                       const std::vector<ObjectSection> &sections,
+                       GLenum draw_mode, vertex_array &quad_va)
+{
+    /* We're not using the depth test anyway, so we don't need this
+     * fb_bamc.bind();
+     * fb_in.blit(0, 0, -1, -1, 0, 0, -1, -1, GL_DEPTH_BUFFER_BIT);
+     */
+
+    fb_bamc.mask(1);
+    fb_bamc.bind();
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    fb_bamc.unmask(1);
+    fb_bamc.mask(0);
+    fb_bamc.bind();
+    glClearColor(1.f, 0.f, 0.f, 0.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+
+    fb_bamc.unmask(0);
+    fb_bamc.bind();
+
+    glEnable(GL_BLEND);
+    glBlendFunci(0, GL_ONE, GL_ONE);
+    glBlendFunci(1, GL_ZERO, GL_SRC_COLOR);
+
+    prg_draw.use();
+    draw_with_alpha(prg_draw, mv, proj, alpha, sections, draw_mode);
+
+    glBlendFunc(GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA);
+
+    fb_in.bind();
+    fb_bamc[0].bind();
+    fb_bamc[1].bind();
+
+    prg_resolve.use();
+    prg_resolve.uniform<texture>("accum") = fb_bamc[0];
+    prg_resolve.uniform<texture>("transp") = fb_bamc[1];
+    quad_va.draw(GL_TRIANGLE_STRIP);
+
+    glDisable(GL_BLEND);
+
+    framebuffer::unbind();
+    fb_in.blit(0, 0, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT);
+}
+
+
 int main(int argc, char *argv[])
 {
     if (argc < 2) {
@@ -352,13 +402,16 @@ int main(int argc, char *argv[])
 
     program draw_tex_prg   {shader(shader::FRAGMENT, "draw_tex_frag.glsl")};
     program draw_bamy1_prg {shader(shader::FRAGMENT, "draw_bamy1_frag.glsl")};
+    program draw_bamc1_prg {shader(shader::FRAGMENT, "draw_bamc1_frag.glsl")};
 
     program *draw_abuf1_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
         draw_abuf1_prg = new program {shader(shader::FRAGMENT, "draw_abuf1_frag.glsl")};
     }
 
-    for (program *prg: {&draw_tex_prg, &draw_bamy1_prg, draw_abuf1_prg}) {
+    for (program *prg: {&draw_tex_prg, &draw_bamy1_prg, &draw_bamc1_prg,
+                        draw_abuf1_prg})
+    {
         if (!prg) {
             continue;
         }
@@ -367,8 +420,6 @@ int main(int argc, char *argv[])
         prg->bind_attrib("in_pos", 0);
         prg->bind_frag("out_col", 0);
     }
-
-    draw_bamy1_prg.bind_frag("out_count", 1);
 
     shader *simple_vsh = new shader(shader::VERTEX, "draw_xf_vert.glsl");
 
@@ -380,6 +431,8 @@ int main(int argc, char *argv[])
     program draw_simple_prg {shader(shader::FRAGMENT, "draw_simple_frag.glsl")};
     program draw_meshk_prg  {shader(shader::FRAGMENT, "draw_meshk_frag.glsl")};
     program draw_bamy0_prg  {shader(shader::FRAGMENT, "draw_bamy0_frag.glsl")};
+    program draw_bamc0_prg  {shader(shader::FRAGMENT, "draw_bamc0_frag.glsl")};
+    program draw_bamc0w_prg {shader(shader::FRAGMENT, "draw_bamc0w_frag.glsl")};
 
     program *draw_abuf0_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
@@ -388,7 +441,8 @@ int main(int argc, char *argv[])
 
     for (program *prg: {&draw_bf_prg, &draw_ff_prg, &draw_dp_prg,
                         &draw_bfdp_prg, &draw_ffdp_prg, &draw_simple_prg,
-                        &draw_meshk_prg, &draw_bamy0_prg, draw_abuf0_prg})
+                        &draw_meshk_prg, &draw_bamy0_prg, &draw_bamc0_prg,
+                        &draw_bamc0w_prg, draw_abuf0_prg})
     {
         if (!prg) {
             continue;
@@ -400,6 +454,10 @@ int main(int argc, char *argv[])
         prg->bind_attrib("in_col", 2);
         prg->bind_frag("out_col", 0);
     }
+
+    draw_bamy0_prg.bind_frag("out_count", 1);
+    draw_bamc0_prg.bind_frag("out_transp", 1);
+    draw_bamc0w_prg.bind_frag("out_transp", 1);
 
     obj entity = load_obj("entity.obj"), entity_copy = entity;
     std::vector<ObjectSection> entity_secs;
@@ -476,15 +534,20 @@ int main(int argc, char *argv[])
         framebuffer(1),
         framebuffer(1)
     };
-    framebuffer fb_bamy(2, GL_RGB16F);
+    framebuffer fb_bamy(2, GL_RGB16F), fb_bamc(2);
+
+    fb_bamc.color_format(0, GL_RGBA16F);
+    fb_bamc.color_format(1, GL_RED);
 
     fbs[0].resize(WIDTH, HEIGHT);
     fbs[1].resize(WIDTH, HEIGHT);
     fb_bamy.resize(WIDTH, HEIGHT);
+    fb_bamc.resize(WIDTH, HEIGHT);
 
     fbs[0].depth().tmu() = 1;
     fbs[1].depth().tmu() = 1;
     fb_bamy[1].tmu() = 1;
+    fb_bamc[1].tmu() = 1;
 
 
     mat4 mv = mat4::identity().translated(vec3(0.f, 0.f, -5.f));
@@ -504,6 +567,8 @@ int main(int argc, char *argv[])
         ABUFFER_LL,
         BLEND_MESHKIN,
         BLEND_BAVOIL_MYER,
+        BLEND_BAVOIL_MCGUIRE,
+        BLEND_BAVOIL_MCGUIRE_WEIGHT,
         SS_REFRACT,
         SS_REFRACT_DP,
         BLEND_ADD,
@@ -518,6 +583,8 @@ int main(int argc, char *argv[])
         "alpha blending with a A-Buffer (linked list)",
         "Meshkin's blending",
         "Bavoil's and Myer's blending",
+        "Bavoil's and McGuire's blending",
+        "Bavoil's and McGuire's blending with depth weighting",
         "screen-space refraction and absorption",
         "screen-space refraction and absorption with depth peeling",
         "additive blending",
@@ -558,6 +625,8 @@ int main(int argc, char *argv[])
                         need_fbs = mode == BLEND_ALPHA_DP
                                 || mode == BLEND_MESHKIN
                                 || mode == BLEND_BAVOIL_MYER
+                                || mode == BLEND_BAVOIL_MCGUIRE
+                                || mode == BLEND_BAVOIL_MCGUIRE_WEIGHT
                                 || mode == SS_REFRACT || mode == SS_REFRACT_DP;
                         snprintf(window_title, sizeof(window_title), "transp - %s", mode_str[mode]);
                         SDL_SetWindowTitle(wnd, window_title);
@@ -643,6 +712,16 @@ int main(int argc, char *argv[])
             case BLEND_BAVOIL_MYER:
                 blend_bamy(fbs[0], fb_bamy, mv, p, draw_bamy0_prg,
                            draw_bamy1_prg, .5f, *cur_obj, cur_draw_mode, quad);
+                break;
+
+            case BLEND_BAVOIL_MCGUIRE:
+                blend_bamc(fbs[0], fb_bamc, mv, p, draw_bamc0_prg,
+                           draw_bamc1_prg, .5f, *cur_obj, cur_draw_mode, quad);
+                break;
+
+            case BLEND_BAVOIL_MCGUIRE_WEIGHT:
+                blend_bamc(fbs[0], fb_bamc, mv, p, draw_bamc0w_prg,
+                           draw_bamc1_prg, .5f, *cur_obj, cur_draw_mode, quad);
                 break;
 
             case SS_REFRACT:
