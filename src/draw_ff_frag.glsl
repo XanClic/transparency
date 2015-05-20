@@ -12,6 +12,9 @@ uniform mat3 mat_nrp;
 void main(void)
 {
     vec2 straight = vf_pos.xy;
+    // This value must be low so relatively few points outside of the backface
+    // get hit; but it may not be 0.0 so one sees the frontface doing some
+    // refraction.
     vec2 refractd = straight - 0.05 * normalize(mat_nrp * vf_nrm).xy;
 
     float sd = texture(depth, straight).r;
@@ -19,13 +22,13 @@ void main(void)
 
     vec4 c = texture(fb, refractd);
 
-    float zb = mix(rd, sd, c.a);
-    float zb_a = 2.0 * 0.01 * 1.0 / (1.0 + 0.01 - zb * (1.0 - 0.01));
-    float zf_a = 2.0 * 0.01 * 1.0 / (1.0 + 0.01 - vf_pos.z * (1.0 - 0.01));
+    float zb = rd < vf_pos.z ? sd : rd;
+    float zb_a = zb * 10.0;
+    float zf_a = vf_pos.z * 10.0;
 
     out_col = vec4(c.rgb *
-                   vec3(1.0 - (zb_a - zf_a) * 10.0,
-                        1.0 - (zb_a - zf_a) * 15.0,
-                        1.0 - (zb_a - zf_a) * 20.0),
+                   vec3(1.0 - (zb_a - zf_a) * 0.5,
+                        1.0 - (zb_a - zf_a) * 1.0,
+                        1.0 - (zb_a - zf_a) * 1.5),
                    1.0);
 }
