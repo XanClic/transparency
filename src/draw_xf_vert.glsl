@@ -3,7 +3,7 @@
 
 in vec3 in_pos, in_col, in_nrm;
 
-out vec3 vf_nrm, vf_pos;
+out vec3 vf_nrm, vf_pos, vf_col;
 
 uniform mat4 mat_mvp;
 
@@ -14,4 +14,5 @@ void main(void)
     gl_Position = pos;
     vf_pos = (pos.xyz / pos.w) / 2.0 + vec3(0.5);
     vf_nrm = in_nrm;
+    vf_col = in_col;
 }

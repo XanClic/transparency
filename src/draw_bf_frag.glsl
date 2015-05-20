@@ -11,5 +11,5 @@ uniform mat3 mat_nrp;
 
 void main(void)
 {
-    out_col = texture(fb, vf_pos.xy - 0.05 * normalize(mat_nrp * vf_nrm).xy);
+    out_col = texture(fb, vf_pos.xy - 0.4 * normalize(mat_nrp * vf_nrm).xy);
 }

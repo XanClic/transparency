@@ -1,10 +1,12 @@
 #version 150 core
 
 
+in vec3 vf_col;
+
 out vec4 out_col;
 
 uniform sampler2D fb, depth;
-uniform vec4 color;
+uniform float alpha;
 
 
 void main(void)
@@ -13,5 +15,7 @@ void main(void)
         discard;
     }
 
-    out_col = color + (1.0 - color.a) * texelFetch(fb, ivec2(gl_FragCoord.xy), 0);
+    out_col = mix(vec4(vf_col, 1.0),
+                  texelFetch(fb, ivec2(gl_FragCoord.xy), 0),
+                  alpha);
 }

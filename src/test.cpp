@@ -27,11 +27,11 @@ using namespace dake::math;
 
 struct ObjectSection {
     vertex_array *va;
-    vec3 color;
+    mat4 rel_mv;
 };
 
 
-static void ss_refract(framebuffer *fbs, const mat4 &mvp, const mat3 &nrp,
+static void ss_refract(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
                        program &draw_bf_prg, program &draw_ff_prg,
                        const std::vector<ObjectSection> &sections,
                        GLenum draw_mode)
@@ -46,9 +46,10 @@ static void ss_refract(framebuffer *fbs, const mat4 &mvp, const mat3 &nrp,
     fbs[0][0].bind();
     draw_bf_prg.use();
     draw_bf_prg.uniform<texture>("fb") = fbs[0][0];
-    draw_bf_prg.uniform<mat4>("mat_mvp") = mvp;
-    draw_bf_prg.uniform<mat3>("mat_nrp") = nrp;
+
     for (const ObjectSection &sec: sections) {
+        draw_bf_prg.uniform<mat3>("mat_nrp") = mat3(proj) * (mat3(sec.rel_mv) * mat3(mv)).transposed_inverse();
+        draw_bf_prg.uniform<mat4>("mat_mvp") = proj * sec.rel_mv * mv;
         sec.va->draw(draw_mode);
     }
 
@@ -61,9 +62,9 @@ static void ss_refract(framebuffer *fbs, const mat4 &mvp, const mat3 &nrp,
     draw_ff_prg.use();
     draw_ff_prg.uniform<texture>("fb") = fbs[1][0];
     draw_ff_prg.uniform<texture>("depth") = fbs[1].depth();
-    draw_ff_prg.uniform<mat4>("mat_mvp") = mvp;
-    draw_ff_prg.uniform<mat3>("mat_nrp") = nrp;
     for (const ObjectSection &sec: sections) {
+        draw_ff_prg.uniform<mat3>("mat_nrp") = mat3(proj) * (mat3(sec.rel_mv) * mat3(mv)).transposed_inverse();
+        draw_ff_prg.uniform<mat4>("mat_mvp") = proj * sec.rel_mv * mv;
         sec.va->draw(draw_mode);
     }
 
@@ -75,7 +76,7 @@ static void ss_refract(framebuffer *fbs, const mat4 &mvp, const mat3 &nrp,
 }
 
 
-static void ss_refract_dp(framebuffer *fbs, const mat4 &mvp, const mat3 &nrp,
+static void ss_refract_dp(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
                           program &draw_bfdp_prg, program &draw_ffdp_prg,
                           const std::vector<ObjectSection> &sections,
                           GLenum draw_mode)
@@ -85,8 +86,11 @@ static void ss_refract_dp(framebuffer *fbs, const mat4 &mvp, const mat3 &nrp,
     glDepthFunc(GL_GREATER);
     glClearDepth(0.f);
 
-    for (int pass = 0; pass < 3; pass++) {
+    for (int pass = 0; pass < 4; pass++) {
         fbs[1].bind();
+        // If no fragments are drawn to a certain pixel, it will have to remain
+        // unchanged from the previous pass, and not from the pre-previous
+        fbs[0].blit();
         glClear(GL_DEPTH_BUFFER_BIT);
 
         glCullFace(GL_FRONT);
@@ -96,13 +100,14 @@ static void ss_refract_dp(framebuffer *fbs, const mat4 &mvp, const mat3 &nrp,
         draw_bfdp_prg.use();
         draw_bfdp_prg.uniform<texture>("fb") = fbs[0][0];
         draw_bfdp_prg.uniform<texture>("depth") = fbs[0].depth();
-        draw_bfdp_prg.uniform<mat4>("mat_mvp") = mvp;
-        draw_bfdp_prg.uniform<mat3>("mat_nrp") = nrp;
         for (const ObjectSection &sec: sections) {
+            draw_bfdp_prg.uniform<mat3>("mat_nrp") = mat3(proj) * (mat3(sec.rel_mv) * mat3(mv)).transposed_inverse();
+            draw_bfdp_prg.uniform<mat4>("mat_mvp") = proj * sec.rel_mv * mv;
             sec.va->draw(draw_mode);
         }
 
         fbs[0].bind();
+        fbs[1].blit();
         glClear(GL_DEPTH_BUFFER_BIT);
 
         glCullFace(GL_BACK);
@@ -112,9 +117,9 @@ static void ss_refract_dp(framebuffer *fbs, const mat4 &mvp, const mat3 &nrp,
         draw_ffdp_prg.use();
         draw_ffdp_prg.uniform<texture>("fb") = fbs[1][0];
         draw_ffdp_prg.uniform<texture>("depth") = fbs[1].depth();
-        draw_ffdp_prg.uniform<mat4>("mat_mvp") = mvp;
-        draw_ffdp_prg.uniform<mat3>("mat_nrp") = nrp;
         for (const ObjectSection &sec: sections) {
+            draw_ffdp_prg.uniform<mat3>("mat_nrp") = mat3(proj) * (mat3(sec.rel_mv) * mat3(mv)).transposed_inverse();
+            draw_ffdp_prg.uniform<mat4>("mat_mvp") = proj * sec.rel_mv * mv;
             sec.va->draw(draw_mode);
         }
     }
@@ -129,7 +134,20 @@ static void ss_refract_dp(framebuffer *fbs, const mat4 &mvp, const mat3 &nrp,
 }
 
 
-static void blend_alpha_dp(framebuffer *fbs, const mat4 &mvp,
+static void draw_with_alpha(program &prg, const mat4 &mv, const mat4 &proj,
+                            float alpha,
+                            const std::vector<ObjectSection> &sections,
+                            GLenum draw_mode)
+{
+    for (const ObjectSection &sec: sections) {
+        prg.uniform<float>("alpha") = alpha;
+        prg.uniform<mat4>("mat_mvp") = proj * sec.rel_mv * mv;
+        sec.va->draw(draw_mode);
+    }
+}
+
+
+static void blend_alpha_dp(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
                            program &prg, float alpha,
                            const std::vector<ObjectSection> &sections,
                            GLenum draw_mode)
@@ -140,8 +158,10 @@ static void blend_alpha_dp(framebuffer *fbs, const mat4 &mvp,
 
     int fb = 1;
 
-    for (int pass = 0; pass < 3; pass++) {
+    for (int pass = 0; pass < 8; pass++) {
         fbs[fb].bind();
+        // If no fragments are drawn to a certain pixel, it will have to remain
+        // unchanged from the previous pass, and not from the pre-previous
         fbs[!fb].blit();
 
         glClear(GL_DEPTH_BUFFER_BIT);
@@ -151,13 +171,7 @@ static void blend_alpha_dp(framebuffer *fbs, const mat4 &mvp,
         prg.use();
         prg.uniform<texture>("fb") = fbs[!fb][0];
         prg.uniform<texture>("depth") = fbs[!fb].depth();
-        prg.uniform<mat4>("mat_mvp") = mvp;
-        for (const ObjectSection &sec: sections) {
-            vec4 rgba = alpha * sec.color;
-            rgba.a() = alpha;
-            prg.uniform<vec4>("color") = rgba;
-            sec.va->draw(draw_mode);
-        }
+        draw_with_alpha(prg, mv, proj, alpha, sections, draw_mode);
 
         fb = !fb;
     }
@@ -171,25 +185,19 @@ static void blend_alpha_dp(framebuffer *fbs, const mat4 &mvp,
 }
 
 
-static void simple_draw(const mat4 &mvp, program &prg, float alpha,
-                        const std::vector<ObjectSection> &sections,
+static void simple_draw(const mat4 &mv, const mat4 &proj, program &prg,
+                        float alpha, const std::vector<ObjectSection> &sections,
                         GLenum draw_mode)
 {
     prg.use();
-    prg.uniform<mat4>("mat_mvp") = mvp;
-    for (const ObjectSection &sec: sections) {
-        vec4 rgba = alpha * sec.color;
-        rgba.a() = alpha;
-        prg.uniform<vec4>("color") = rgba;
-        sec.va->draw(draw_mode);
-    }
+    draw_with_alpha(prg, mv, proj, alpha, sections, draw_mode);
 }
 
 
-static void abuffer_ll(const mat4 &mvp, program &abuf0_prg, program &abuf1_prg,
-                       texture &head, texture &list, float alpha,
-                       const std::vector<ObjectSection> &sections,
-                       GLenum draw_mode, vertex_array *quad_va)
+static void abuffer_ll(const mat4 &mv, const mat4 &proj, program &abuf0_prg,
+                       program &abuf1_prg, texture &head, texture &list,
+                       float alpha, const std::vector<ObjectSection> &sections,
+                       GLenum draw_mode, vertex_array &quad_va)
 {
     static GLuint atomic_counter_buffer;
 
@@ -216,13 +224,7 @@ static void abuffer_ll(const mat4 &mvp, program &abuf0_prg, program &abuf1_prg,
     abuf0_prg.use();
     abuf0_prg.uniform<int32_t>("head") = 0;
     abuf0_prg.uniform<int32_t>("list") = 1;
-    abuf0_prg.uniform<mat4>("mat_mvp") = mvp;
-    for (const ObjectSection &sec: sections) {
-        vec4 rgba = alpha * sec.color;
-        rgba.a() = alpha;
-        abuf0_prg.uniform<vec4>("color") = rgba;
-        sec.va->draw(draw_mode);
-    }
+    draw_with_alpha(abuf0_prg, mv, proj, alpha, sections, draw_mode);
 
     glColorMask(true, true, true, true);
 
@@ -236,7 +238,7 @@ static void abuffer_ll(const mat4 &mvp, program &abuf0_prg, program &abuf1_prg,
     abuf1_prg.use();
     abuf1_prg.uniform<int32_t>("head") = 0;
     abuf1_prg.uniform<int32_t>("list") = 1;
-    quad_va->draw(GL_TRIANGLE_STRIP);
+    quad_va.draw(GL_TRIANGLE_STRIP);
 
     glBindImageTexture(0, 0, 0, false, 0, 0, GL_R32UI);
     glBindImageTexture(1, 0, 0, false, 0, 0, GL_RGBA32UI);
@@ -245,8 +247,8 @@ static void abuffer_ll(const mat4 &mvp, program &abuf0_prg, program &abuf1_prg,
 }
 
 
-static void blend_meshkin(framebuffer *fbs, const mat4 &mvp, program &prg,
-                          float alpha,
+static void blend_meshkin(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
+                          program &prg, float alpha,
                           const std::vector<ObjectSection> &sections,
                           GLenum draw_mode)
 {
@@ -257,18 +259,49 @@ static void blend_meshkin(framebuffer *fbs, const mat4 &mvp, program &prg,
 
     prg.use();
     prg.uniform<texture>("fb") = fbs[0][0];
-    prg.uniform<mat4>("mat_mvp") = mvp;
-    for (const ObjectSection &sec: sections) {
-        vec4 rgba = alpha * sec.color;
-        rgba.a() = alpha;
-        prg.uniform<vec4>("color") = rgba;
-        sec.va->draw(draw_mode);
-    }
+    draw_with_alpha(prg, mv, proj, alpha, sections, draw_mode);
 
     glDisable(GL_BLEND);
 
     framebuffer::unbind();
     fbs[1].blit(0, 0, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT);
+}
+
+
+static void blend_bamy(framebuffer &fb_in, framebuffer &fb_bamy,
+                       const mat4 &mv, const mat4 &proj, program &prg_draw,
+                       program &prg_resolve, float alpha,
+                       const std::vector<ObjectSection> &sections,
+                       GLenum draw_mode, vertex_array &quad_va)
+{
+    fb_bamy.bind();
+    /* We're not using the depth test anyway, so we don't need this
+     * fb_in.blit(0, 0, -1, -1, 0, 0, -1, -1, GL_DEPTH_BUFFER_BIT);
+     */
+
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+
+    prg_draw.use();
+    draw_with_alpha(prg_draw, mv, proj, alpha, sections, draw_mode);
+
+    glBlendFunc(GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA);
+
+    fb_in.bind();
+    fb_bamy[0].bind();
+    fb_bamy[1].bind();
+
+    prg_resolve.use();
+    prg_resolve.uniform<texture>("accum") = fb_bamy[0];
+    prg_resolve.uniform<texture>("count") = fb_bamy[1];
+    quad_va.draw(GL_TRIANGLE_STRIP);
+
+    glDisable(GL_BLEND);
+
+    framebuffer::unbind();
+    fb_in.blit(0, 0, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT);
 }
 
 
@@ -297,15 +330,15 @@ int main(int argc, char *argv[])
 
     texture input(argv[1]);
 
-    vertex_array *quad = new vertex_array;
-    quad->set_elements(4);
+    vertex_array quad;
+    quad.set_elements(4);
 
     vec2 quad_vertex_positions[] = {
         vec2(-1.f, 1.f), vec2(-1.f, -1.f), vec2(1.f, 1.f), vec2(1.f, -1.f)
     };
 
-    quad->attrib(0)->format(2);
-    quad->attrib(0)->data(quad_vertex_positions);
+    quad.attrib(0)->format(2);
+    quad.attrib(0)->data(quad_vertex_positions);
 
 
     texture abuf_ll_head, abuf_list_data;
@@ -315,18 +348,27 @@ int main(int argc, char *argv[])
     abuf_list_data.tmu() = 1;
 
 
-    program draw_tex_prg {shader(shader::VERTEX,   "draw_tex_vert.glsl"),
-                          shader(shader::FRAGMENT, "draw_tex_frag.glsl")};
-    draw_tex_prg.bind_attrib("in_pos", 0);
-    draw_tex_prg.bind_frag("out_col", 0);
+    shader *pass_vsh = new shader(shader::VERTEX, "draw_tex_vert.glsl");
+
+    program draw_tex_prg   {shader(shader::FRAGMENT, "draw_tex_frag.glsl")};
+    program draw_bamy1_prg {shader(shader::FRAGMENT, "draw_bamy1_frag.glsl")};
 
     program *draw_abuf1_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
-        draw_abuf1_prg = new program {shader(shader::VERTEX,   "draw_abuf1_vert.glsl"),
-                                      shader(shader::FRAGMENT, "draw_abuf1_frag.glsl")};
-        draw_abuf1_prg->bind_attrib("in_pos", 0);
-        draw_abuf1_prg->bind_frag("out_col", 0);
+        draw_abuf1_prg = new program {shader(shader::FRAGMENT, "draw_abuf1_frag.glsl")};
     }
+
+    for (program *prg: {&draw_tex_prg, &draw_bamy1_prg, draw_abuf1_prg}) {
+        if (!prg) {
+            continue;
+        }
+
+        *prg << *pass_vsh;
+        prg->bind_attrib("in_pos", 0);
+        prg->bind_frag("out_col", 0);
+    }
+
+    draw_bamy1_prg.bind_frag("out_count", 1);
 
     shader *simple_vsh = new shader(shader::VERTEX, "draw_xf_vert.glsl");
 
@@ -337,6 +379,7 @@ int main(int argc, char *argv[])
     program draw_ffdp_prg   {shader(shader::FRAGMENT, "draw_ffdp_frag.glsl")};
     program draw_simple_prg {shader(shader::FRAGMENT, "draw_simple_frag.glsl")};
     program draw_meshk_prg  {shader(shader::FRAGMENT, "draw_meshk_frag.glsl")};
+    program draw_bamy0_prg  {shader(shader::FRAGMENT, "draw_bamy0_frag.glsl")};
 
     program *draw_abuf0_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
@@ -345,7 +388,7 @@ int main(int argc, char *argv[])
 
     for (program *prg: {&draw_bf_prg, &draw_ff_prg, &draw_dp_prg,
                         &draw_bfdp_prg, &draw_ffdp_prg, &draw_simple_prg,
-                        &draw_meshk_prg, draw_abuf0_prg})
+                        &draw_meshk_prg, &draw_bamy0_prg, draw_abuf0_prg})
     {
         if (!prg) {
             continue;
@@ -354,38 +397,77 @@ int main(int argc, char *argv[])
         *prg << *simple_vsh;
         prg->bind_attrib("in_pos", 0);
         prg->bind_attrib("in_nrm", 1);
+        prg->bind_attrib("in_col", 2);
         prg->bind_frag("out_col", 0);
     }
 
-    obj entity = load_obj("entity.obj");
+    obj entity = load_obj("entity.obj"), entity_copy = entity;
     std::vector<ObjectSection> entity_secs;
     for (obj_section &sec: entity.sections) {
         entity_secs.emplace_back();
         entity_secs.back().va = sec.make_vertex_array(0, -1, 1);
-        entity_secs.back().color = sec.material.diffuse;
+        entity_secs.back().rel_mv = mat4::identity().translated(vec3(-2.f, 0.f, 0.f));
+
+        vec3 *col_arr = new vec3[sec.positions.size()];
+        for (size_t i = 0; i < sec.positions.size(); i++) {
+            col_arr[i] = vec3(1.f, sec.positions[i].z(), 0.f);
+        }
+        entity_secs.back().va->attrib(2)->format(3);
+        entity_secs.back().va->attrib(2)->data(col_arr);
+    }
+
+    for (obj_section &sec: entity_copy.sections) {
+        // Invert triangle order
+        size_t l = sec.positions.size();
+        assert(!(l % 3) && l == sec.normals.size());
+        // Works with uneven l, too
+        for (size_t i = 0; i < l / 2; i += 3) {
+            for (std::vector<vec3> *vtx: {&sec.positions, &sec.normals}) {
+                for (int j = 0; j < 3; j++) {
+                    vec3 v = (*vtx)[i + j];
+                    (*vtx)[i + j] = (*vtx)[l - i - 3 + j];
+                    (*vtx)[l - i - 3 + j] = v;
+                }
+            }
+        }
+
+        entity_secs.emplace_back();
+        entity_secs.back().va = sec.make_vertex_array(0, -1, 1);
+        entity_secs.back().rel_mv = mat4::identity().translated(vec3(2.f, 0.f, 0.f));
+
+        vec3 *col_arr = new vec3[sec.positions.size()];
+        for (size_t i = 0; i < sec.positions.size(); i++) {
+            col_arr[i] = vec3(1.f, sec.positions[i].z(), 0.f);
+        }
+        entity_secs.back().va->attrib(2)->format(3);
+        entity_secs.back().va->attrib(2)->data(col_arr);
     }
 
     std::vector<ObjectSection> quad_secs;
-    vec3 translated_quad[4];
     for (int x: {-1, 1}) {
         for (int rl = 0; rl < 3; rl++) {
             int l = x < 0 ? rl : 2 - rl;
 
-            for (int v = 0; v < 4; v++) {
-                vec2 xy = quad_vertex_positions[v]
-                        + vec2(x * 2.f, 0.f)
-                        + vec2(l * .2f, -l * .2f);
-                translated_quad[v] = vec3(xy.x(), xy.y(), .1f * l);
+            vec3 pos[4], nrm[4], col[4];
+            for (int i = 0; i < 4; i++) {
+                pos[i] = vec3(quad_vertex_positions[i]);
+                nrm[i] = vec3(0.f, 0.f, 1.f);
+                col[i] = l == 0 ? vec3(1.f, .5f, .5f)
+                                : l == 1 ? vec3(.5f, 1.f, .5f)
+                                :          vec3(.5f, .5f, 1.f);
             }
+
 
             quad_secs.emplace_back();
             quad_secs.back().va = new vertex_array;
             quad_secs.back().va->set_elements(4);
             quad_secs.back().va->attrib(0)->format(3);
-            quad_secs.back().va->attrib(0)->data(translated_quad);
-            quad_secs.back().color = l == 0 ? vec3(1.f, .5f, .5f)
-                                   : l == 1 ? vec3(.5f, 1.f, .5f)
-                                   :          vec3(.5f, .5f, 1.f);
+            quad_secs.back().va->attrib(0)->data(pos);
+            quad_secs.back().va->attrib(1)->format(3);
+            quad_secs.back().va->attrib(1)->data(nrm);
+            quad_secs.back().va->attrib(2)->format(3);
+            quad_secs.back().va->attrib(2)->data(col);
+            quad_secs.back().rel_mv = mat4::identity().translated(vec3(x * 2.f + l * .2f, -l * .2f, l * .1f));
         }
     }
 
@@ -394,16 +476,21 @@ int main(int argc, char *argv[])
         framebuffer(1),
         framebuffer(1)
     };
+    framebuffer fb_bamy(2, GL_RGB16F);
 
     fbs[0].resize(WIDTH, HEIGHT);
     fbs[1].resize(WIDTH, HEIGHT);
+    fb_bamy.resize(WIDTH, HEIGHT);
 
     fbs[0].depth().tmu() = 1;
     fbs[1].depth().tmu() = 1;
+    fb_bamy[1].tmu() = 1;
 
 
     mat4 mv = mat4::identity().translated(vec3(0.f, 0.f, -5.f));
-    mat4 p = mat4::projection(M_PIf / 4.f, static_cast<float>(WIDTH) / HEIGHT, .1f, 50.f);
+    float aspect = static_cast<float>(WIDTH) / HEIGHT;
+    //mat4 p = mat4::projection(M_PIf / 32.f, aspect, .1f, 10.f);
+    mat4 p = mat4::orthographic(-4.f, 4.f, 4.f / aspect, -4.f / aspect, 0.f, 10.f);
 
     std::default_random_engine reng;
     std::uniform_real_distribution<float> dist(-.8f, .8f);
@@ -416,6 +503,7 @@ int main(int argc, char *argv[])
         BLEND_ALPHA_DP,
         ABUFFER_LL,
         BLEND_MESHKIN,
+        BLEND_BAVOIL_MYER,
         SS_REFRACT,
         SS_REFRACT_DP,
         BLEND_ADD,
@@ -423,6 +511,22 @@ int main(int argc, char *argv[])
 
         MODE_MAX
     } mode = BLEND_ALPHA;
+
+    const char *mode_str[] = {
+        "plain alpha blending",
+        "alpha blending with depth peeling",
+        "alpha blending with a A-Buffer (linked list)",
+        "Meshkin's blending",
+        "Bavoil's and Myer's blending",
+        "screen-space refraction and absorption",
+        "screen-space refraction and absorption with depth peeling",
+        "additive blending",
+        "multiplicative blending"
+    };
+
+    char window_title[128];
+    snprintf(window_title, sizeof(window_title), "transp - %s", mode_str[mode]);
+    SDL_SetWindowTitle(wnd, window_title);
 
     enum Objects {
         SUZANNE,
@@ -445,10 +549,18 @@ int main(int argc, char *argv[])
             } else if (event.type == SDL_KEYUP) {
                 switch (event.key.keysym.sym) {
                     case SDLK_SPACE:
-                        mode = static_cast<Mode>((static_cast<int>(mode) + 1) % MODE_MAX);
+                    case SDLK_BACKSPACE:
+                        if (event.key.keysym.sym == SDLK_SPACE) {
+                            mode = static_cast<Mode>((static_cast<int>(mode) + 1) % MODE_MAX);
+                        } else {
+                            mode = static_cast<Mode>((static_cast<int>(mode) + MODE_MAX - 1) % MODE_MAX);
+                        }
                         need_fbs = mode == BLEND_ALPHA_DP
-                                || mode == BLEND_MESHKIN || mode == SS_REFRACT
-                                || mode == SS_REFRACT_DP;
+                                || mode == BLEND_MESHKIN
+                                || mode == BLEND_BAVOIL_MYER
+                                || mode == SS_REFRACT || mode == SS_REFRACT_DP;
+                        snprintf(window_title, sizeof(window_title), "transp - %s", mode_str[mode]);
+                        SDL_SetWindowTitle(wnd, window_title);
                         break;
 
                     case SDLK_RETURN:
@@ -477,9 +589,6 @@ int main(int argc, char *argv[])
             z_comp = z_target = z_comp_deriv = 0.f;
         }
 
-        mat4 mvp = p * mv;
-        mat3 nrp = mat3(mv).transposed_inverse() * mat3(p);
-
         if (need_fbs) {
             fbs[0].bind();
         } else {
@@ -493,7 +602,7 @@ int main(int argc, char *argv[])
         input.bind();
         draw_tex_prg.use();
         draw_tex_prg.uniform<texture>("fb") = input;
-        quad->draw(GL_TRIANGLE_STRIP);
+        quad.draw(GL_TRIANGLE_STRIP);
 
         glDepthMask(true);
 
@@ -506,41 +615,52 @@ int main(int argc, char *argv[])
         switch (mode) {
             case BLEND_ALPHA:
                 glEnable(GL_BLEND);
-                // Premultiplied source (simple_draw() does that premultiplication)
+                // Premultiplied source (the shaders do that premultiplication)
                 glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-                simple_draw(mvp, draw_simple_prg, .5f, *cur_obj, cur_draw_mode);
+                simple_draw(mv, p, draw_simple_prg, .5f, *cur_obj,
+                            cur_draw_mode);
                 glDisable(GL_BLEND);
                 break;
 
             case BLEND_ALPHA_DP:
-                blend_alpha_dp(fbs, mvp, draw_dp_prg, .5f, *cur_obj, cur_draw_mode);
+                blend_alpha_dp(fbs, mv, p, draw_dp_prg, .5f, *cur_obj,
+                               cur_draw_mode);
                 break;
 
             case ABUFFER_LL:
                 if (draw_abuf0_prg && draw_abuf1_prg) {
-                    abuffer_ll(mvp, *draw_abuf0_prg, *draw_abuf1_prg, abuf_ll_head,
-                               abuf_list_data, .5f, *cur_obj, cur_draw_mode,
-                               quad);
+                    abuffer_ll(mv, p, *draw_abuf0_prg, *draw_abuf1_prg,
+                               abuf_ll_head, abuf_list_data, .5f, *cur_obj,
+                               cur_draw_mode, quad);
                 }
                 break;
 
             case BLEND_MESHKIN:
-                blend_meshkin(fbs, mvp, draw_meshk_prg, .5f, *cur_obj, cur_draw_mode);
+                blend_meshkin(fbs, mv, p, draw_meshk_prg, .5f, *cur_obj,
+                              cur_draw_mode);
+                break;
+
+            case BLEND_BAVOIL_MYER:
+                blend_bamy(fbs[0], fb_bamy, mv, p, draw_bamy0_prg,
+                           draw_bamy1_prg, .5f, *cur_obj, cur_draw_mode, quad);
                 break;
 
             case SS_REFRACT:
-                ss_refract(fbs, mvp, nrp, draw_bf_prg, draw_ff_prg, *cur_obj, cur_draw_mode);
+                ss_refract(fbs, mv, p, draw_bf_prg, draw_ff_prg, *cur_obj,
+                           cur_draw_mode);
                 break;
 
             case SS_REFRACT_DP:
-                ss_refract_dp(fbs, mvp, nrp, draw_bfdp_prg, draw_ffdp_prg, *cur_obj, cur_draw_mode);
+                ss_refract_dp(fbs, mv, p, draw_bfdp_prg, draw_ffdp_prg,
+                              *cur_obj, cur_draw_mode);
                 break;
 
             case BLEND_ADD:
                 glEnable(GL_BLEND);
                 // Premultiplied source
                 glBlendFunc(GL_ONE, GL_ONE);
-                simple_draw(mvp, draw_simple_prg, .2f, *cur_obj, cur_draw_mode);
+                simple_draw(mv, p, draw_simple_prg, .2f, *cur_obj,
+                            cur_draw_mode);
                 glDisable(GL_BLEND);
                 break;
 
@@ -548,7 +668,8 @@ int main(int argc, char *argv[])
                 glEnable(GL_BLEND);
                 // Premultiplied source
                 glBlendFunc(GL_ZERO, GL_SRC_COLOR);
-                simple_draw(mvp, draw_simple_prg, .8f, *cur_obj, cur_draw_mode);
+                simple_draw(mv, p, draw_simple_prg, .8f, *cur_obj,
+                            cur_draw_mode);
                 glDisable(GL_BLEND);
                 break;
 
