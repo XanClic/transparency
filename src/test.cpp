@@ -78,6 +78,7 @@ static void ss_refract(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
 
 static void ss_refract_dp(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
                           program &draw_bfdp_prg, program &draw_ffdp_prg,
+                          int layer,
                           const std::vector<ObjectSection> &sections,
                           GLenum draw_mode)
 {
@@ -88,9 +89,15 @@ static void ss_refract_dp(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
 
     for (int pass = 0; pass < 4; pass++) {
         fbs[1].bind();
-        // If no fragments are drawn to a certain pixel, it will have to remain
-        // unchanged from the previous pass, and not from the pre-previous
-        fbs[0].blit();
+        if (layer == -1) {
+            // If no fragments are drawn to a certain pixel, it will have to
+            // remain unchanged from the previous pass, and not from the
+            // pre-previous
+            fbs[0].blit();
+        } else {
+            bool hit = layer == pass;
+            glColorMask(hit, hit, hit, hit);
+        }
         glClear(GL_DEPTH_BUFFER_BIT);
 
         glCullFace(GL_FRONT);
@@ -107,7 +114,9 @@ static void ss_refract_dp(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
         }
 
         fbs[0].bind();
-        fbs[1].blit();
+        if (layer == -1) {
+            fbs[1].blit();
+        }
         glClear(GL_DEPTH_BUFFER_BIT);
 
         glCullFace(GL_BACK);
@@ -121,6 +130,10 @@ static void ss_refract_dp(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
             draw_ffdp_prg.uniform<mat3>("mat_nrp") = mat3(proj) * (mat3(sec.rel_mv) * mat3(mv)).transposed_inverse();
             draw_ffdp_prg.uniform<mat4>("mat_mvp") = proj * sec.rel_mv * mv;
             sec.va->draw(draw_mode);
+        }
+
+        if (pass == layer) {
+            break;
         }
     }
 
@@ -148,7 +161,7 @@ static void draw_with_alpha(program &prg, const mat4 &mv, const mat4 &proj,
 
 
 static void blend_alpha_dp(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
-                           program &prg, float alpha,
+                           program &prg, int layer, float alpha,
                            const std::vector<ObjectSection> &sections,
                            GLenum draw_mode)
 {
@@ -160,9 +173,16 @@ static void blend_alpha_dp(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
 
     for (int pass = 0; pass < 8; pass++) {
         fbs[fb].bind();
-        // If no fragments are drawn to a certain pixel, it will have to remain
-        // unchanged from the previous pass, and not from the pre-previous
-        fbs[!fb].blit();
+
+        if (layer == -1) {
+            // If no fragments are drawn to a certain pixel, it will have to
+            // remain unchanged from the previous pass, and not from the
+            // pre-previous
+            fbs[!fb].blit();
+        } else {
+            bool hit = layer == pass;
+            glColorMask(hit, hit, hit, hit);
+        }
 
         glClear(GL_DEPTH_BUFFER_BIT);
 
@@ -174,6 +194,10 @@ static void blend_alpha_dp(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
         draw_with_alpha(prg, mv, proj, alpha, sections, draw_mode);
 
         fb = !fb;
+
+        if (pass == layer) {
+            break;
+        }
     }
 
     glDisable(GL_DEPTH_TEST);
@@ -196,7 +220,8 @@ static void simple_draw(const mat4 &mv, const mat4 &proj, program &prg,
 
 static void abuffer_ll(const mat4 &mv, const mat4 &proj, program &abuf0_prg,
                        program &abuf1_prg, texture &head, texture &list,
-                       float alpha, const std::vector<ObjectSection> &sections,
+                       int layer, float alpha,
+                       const std::vector<ObjectSection> &sections,
                        GLenum draw_mode, vertex_array &quad_va)
 {
     static GLuint atomic_counter_buffer;
@@ -238,6 +263,9 @@ static void abuffer_ll(const mat4 &mv, const mat4 &proj, program &abuf0_prg,
     abuf1_prg.use();
     abuf1_prg.uniform<int32_t>("head") = 0;
     abuf1_prg.uniform<int32_t>("list") = 1;
+    if (layer >= 0) {
+        abuf1_prg.uniform<int32_t>("layer") = layer;
+    }
     quad_va.draw(GL_TRIANGLE_STRIP);
 
     glBindImageTexture(0, 0, 0, false, 0, 0, GL_R32UI);
@@ -404,13 +432,16 @@ int main(int argc, char *argv[])
     program draw_bamy1_prg {shader(shader::FRAGMENT, "draw_bamy1_frag.glsl")};
     program draw_bamc1_prg {shader(shader::FRAGMENT, "draw_bamc1_frag.glsl")};
 
-    program *draw_abuf1_prg = nullptr;
+    program *draw_abuf1_prg = nullptr, *draw_abuf1l_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
-        draw_abuf1_prg = new program {shader(shader::FRAGMENT, "draw_abuf1_frag.glsl")};
+        draw_abuf1_prg  = new program {shader(shader::FRAGMENT,
+                                       "draw_abuf1_frag.glsl")};
+        draw_abuf1l_prg = new program {shader(shader::FRAGMENT,
+                                       "draw_abuf1l_frag.glsl")};
     }
 
     for (program *prg: {&draw_tex_prg, &draw_bamy1_prg, &draw_bamc1_prg,
-                        draw_abuf1_prg})
+                        draw_abuf1_prg, draw_abuf1l_prg})
     {
         if (!prg) {
             continue;
@@ -611,6 +642,7 @@ int main(int argc, char *argv[])
     GLenum cur_draw_mode = GL_TRIANGLES;
     bool need_fbs = false;
     bool pause_motion = false;
+    int dp_layer = -1;
 
 
     for (;;) {
@@ -646,6 +678,19 @@ int main(int argc, char *argv[])
                     case SDLK_p:
                         pause_motion ^= true;
                         break;
+
+                    case SDLK_l:
+                        dp_layer += 1;
+                        break;
+                }
+
+                if (dp_layer >=
+                       (mode == BLEND_ALPHA_DP ? 8
+                      : mode == ABUFFER_LL     ? 8
+                      : mode == SS_REFRACT_DP  ? 4
+                      : 0))
+                {
+                    dp_layer = -1;
                 }
             }
         }
@@ -701,14 +746,18 @@ int main(int argc, char *argv[])
                 break;
 
             case BLEND_ALPHA_DP:
-                blend_alpha_dp(fbs, mv, p, draw_dp_prg, .5f, *cur_obj,
+                blend_alpha_dp(fbs, mv, p, draw_dp_prg, dp_layer,
+                               dp_layer >= 0 ? 1.f : .5f, *cur_obj,
                                cur_draw_mode);
                 break;
 
             case ABUFFER_LL:
-                if (draw_abuf0_prg && draw_abuf1_prg) {
-                    abuffer_ll(mv, p, *draw_abuf0_prg, *draw_abuf1_prg,
-                               abuf_ll_head, abuf_list_data, .5f, *cur_obj,
+                if (draw_abuf0_prg && draw_abuf1_prg && draw_abuf1l_prg) {
+                    abuffer_ll(mv, p, *draw_abuf0_prg,
+                               dp_layer >= 0 ? *draw_abuf1l_prg
+                                             : *draw_abuf1_prg,
+                               abuf_ll_head, abuf_list_data, dp_layer,
+                               dp_layer >= 0 ? 1.f : .5f, *cur_obj,
                                cur_draw_mode, quad);
                 }
                 break;
@@ -740,7 +789,7 @@ int main(int argc, char *argv[])
 
             case SS_REFRACT_DP:
                 ss_refract_dp(fbs, mv, p, draw_bfdp_prg, draw_ffdp_prg,
-                              *cur_obj, cur_draw_mode);
+                              dp_layer, *cur_obj, cur_draw_mode);
                 break;
 
             case BLEND_ADD:
