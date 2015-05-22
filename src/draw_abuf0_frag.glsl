@@ -26,7 +26,7 @@ void main(void)
         uint prev = imageAtomicExchange(head, ivec2(gl_FragCoord.xy), i);
         imageStore(list, ivec2(i % LW, i / LW),
                    uvec4(packUnorm4x8(vec4(vf_col, 1.0) * alpha),
-                         floatBitsToInt(gl_FragCoord.z),
+                         floatBitsToUint(gl_FragCoord.z),
                          0, prev));
     }
 
