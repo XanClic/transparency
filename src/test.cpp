@@ -468,7 +468,9 @@ int main(int argc, char *argv[])
 
         vec3 *col_arr = new vec3[sec.positions.size()];
         for (size_t i = 0; i < sec.positions.size(); i++) {
-            col_arr[i] = vec3(1.f, sec.positions[i].z(), 0.f);
+            float green = (sec.positions[i].z() - entity.lower_left.z())
+                        / (entity.upper_right.z() - entity.lower_left.z());
+            col_arr[i] = vec3(1.f, green, 0.f);
         }
         entity_secs.back().va->attrib(2)->format(3);
         entity_secs.back().va->attrib(2)->data(col_arr);
@@ -495,7 +497,9 @@ int main(int argc, char *argv[])
 
         vec3 *col_arr = new vec3[sec.positions.size()];
         for (size_t i = 0; i < sec.positions.size(); i++) {
-            col_arr[i] = vec3(1.f, sec.positions[i].z(), 0.f);
+            float green = (sec.positions[i].z() - entity.lower_left.z())
+                        / (entity.upper_right.z() - entity.lower_left.z());
+            col_arr[i] = vec3(1.f, green, 0.f);
         }
         entity_secs.back().va->attrib(2)->format(3);
         entity_secs.back().va->attrib(2)->data(col_arr);
