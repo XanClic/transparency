@@ -11,7 +11,7 @@ uniform float alpha;
 
 float weight(float depth, float alpha)
 {
-    return alpha * max(0.01, 3000.0 * pow(1.0 - depth, 10.0));
+    return alpha * max(0.01, 3000.0 * pow(1.0 - depth, 3.0));
 }
 
 
