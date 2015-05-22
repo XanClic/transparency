@@ -34,14 +34,14 @@ void main(void)
     for (int i = 1; i < n; i++) {
         uvec2 f = fragments[i];
         int j;
-        for (j = i; j > 0 && fragments[j - 1].y > f.y; j--) {
+        for (j = i; j > 0 && fragments[j - 1].y < f.y; j--) {
             fragments[j] = fragments[j - 1];
         }
         fragments[j] = f;
     }
 
     vec4 color = vec4(0.0);
-    for (int i = n - 1; i >= 0; i--) {
+    for (int i = 0; i < n; i++) {
         vec4 fc = unpackUnorm4x8(fragments[i].x);
         color = fc + (1.0 - fc.a) * color;
     }
