@@ -15,7 +15,7 @@ void main(void)
         discard;
     }
 
-    out_col = mix(vec4(vf_col, 1.0),
-                  texelFetch(fb, ivec2(gl_FragCoord.xy), 0),
+    out_col = mix(texelFetch(fb, ivec2(gl_FragCoord.xy), 0),
+                  vec4(vf_col, 1.0),
                   alpha);
 }
