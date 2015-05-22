@@ -610,6 +610,7 @@ int main(int argc, char *argv[])
     std::vector<ObjectSection> *cur_obj = &entity_secs;
     GLenum cur_draw_mode = GL_TRIANGLES;
     bool need_fbs = false;
+    bool pause_motion = false;
 
 
     for (;;) {
@@ -641,6 +642,10 @@ int main(int argc, char *argv[])
                         cur_obj = objects == SUZANNE ? &entity_secs : &quad_secs;
                         cur_draw_mode = objects == SUZANNE ? GL_TRIANGLES: GL_TRIANGLE_STRIP;
                         break;
+
+                    case SDLK_p:
+                        pause_motion ^= true;
+                        break;
                 }
             }
         }
@@ -649,7 +654,7 @@ int main(int argc, char *argv[])
         float diff = std::chrono::duration_cast<std::chrono::microseconds>(ntp - tp).count() / 1000000.f;
         tp = ntp;
 
-        if (objects == SUZANNE) {
+        if (objects == SUZANNE && !pause_motion) {
             mv.rotate(diff, vec3(0.f, 1.f, z_comp));
 
             if (fabsf(z_comp - z_target) < .01f) {
@@ -657,7 +662,7 @@ int main(int argc, char *argv[])
             }
             z_comp += z_comp_deriv * diff;
             z_comp_deriv += (z_target - z_comp) * (diff / 10.f);
-        } else {
+        } else if (objects != SUZANNE) {
             mv = mat4::identity().translated(vec3(0.f, 0.f, -5.f));
             z_comp = z_target = z_comp_deriv = 0.f;
         }
