@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <getopt.h>
 #include <random>
 #include <vector>
 
@@ -17,8 +18,7 @@
 #include <dake/math.hpp>
 
 
-#define WIDTH  1280
-#define HEIGHT 720
+static int WIDTH = 1280, HEIGHT = 720;
 
 
 using namespace dake::gl;
@@ -385,28 +385,87 @@ static void blend_bamc(framebuffer &fb_in, framebuffer &fb_bamc,
 
 int main(int argc, char *argv[])
 {
-    if (argc < 2) {
+    const char *bg_tex_name, *entity_name = "entity.obj";
+    bool entity_gradient = true, borderless = false, two_objects = true;
+
+    static const struct option options[] = {
+        {"help", no_argument, nullptr, 'h'},
+        {"entity", required_argument, nullptr, 'e'},
+        {"material", no_argument, nullptr, 'm'},
+        {"borderless", no_argument, nullptr, 'b'},
+        {"single", no_argument, nullptr, 's'},
+
+        {nullptr, 0, nullptr, 0}
+    };
+
+    for (;;) {
+        int option = getopt_long(argc, argv, "he:mbs", options, nullptr);
+        if (option == -1) {
+            break;
+        }
+
+        switch (option) {
+            case 'h':
+            case '?':
+                fprintf(stderr, "Usage: %s [options...] <bg-texture.(png|jpg)>\n\n", argv[0]);
+                fprintf(stderr, "Options:\n");
+                fprintf(stderr, "  -h, --help                   Shows this information\n");
+                fprintf(stderr, "  -e, --entity=<entity.obj>    Chooses a mesh to be displayed\n");
+                fprintf(stderr, "  -m, --material               Uses the material as specified by the entity,\n");
+                fprintf(stderr, "                               instead of generating a gradient\n");
+                fprintf(stderr, "  -b, --borderless             Run borderless in 1920x1080\n");
+                fprintf(stderr, "  -s, --single                 Draw only a single object\n");
+                return 0;
+
+            case 'e':
+                entity_name = optarg;
+                break;
+
+            case 'm':
+                entity_gradient = false;
+                break;
+
+            case 'b':
+                WIDTH = 1920;
+                HEIGHT = 1080;
+                borderless = true;
+                break;
+
+            case 's':
+                two_objects = false;
+                break;
+        }
+    }
+
+    if (optind != argc - 1) {
+        fprintf(stderr, "Expecting exactly one non-option argument\n");
         return 1;
     }
+
+    bg_tex_name = argv[optind];
 
     SDL_Init(SDL_INIT_VIDEO);
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                        SDL_GL_CONTEXT_PROFILE_CORE);
 
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetSwapInterval(1);
 
-    SDL_Window *wnd = SDL_CreateWindow("transp", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, WIDTH, HEIGHT, SDL_WINDOW_OPENGL);
+    SDL_Window *wnd = SDL_CreateWindow("transp", SDL_WINDOWPOS_UNDEFINED,
+                                       SDL_WINDOWPOS_UNDEFINED, WIDTH, HEIGHT,
+                                       SDL_WINDOW_OPENGL
+                                       | (borderless * SDL_WINDOW_BORDERLESS));
     SDL_GL_CreateContext(wnd);
 
 
     glext.init();
 
 
-    texture input(argv[1]);
+    texture input(bg_tex_name);
 
     vertex_array quad;
     quad.set_elements(4);
@@ -490,54 +549,74 @@ int main(int argc, char *argv[])
     draw_bamc0_prg.bind_frag("out_transp", 1);
     draw_bamc0w_prg.bind_frag("out_transp", 1);
 
-    obj entity = load_obj("entity.obj"), entity_copy = entity;
+    obj entity = load_obj(entity_name), entity_copy = entity;
     std::vector<ObjectSection> entity_secs;
     for (obj_section &sec: entity.sections) {
         entity_secs.emplace_back();
         entity_secs.back().va = sec.make_vertex_array(0, -1, 1);
-        entity_secs.back().rel_mv = mat4::identity().translated(vec3(-2.f, 0.f, 0.f));
+        entity_secs.back().rel_mv = mat4::identity();
+        if (two_objects) {
+            entity_secs.back().rel_mv.translate(vec3(-2.f, 0.f, 0.f));
+        }
 
         vec3 *col_arr = new vec3[sec.positions.size()];
         for (size_t i = 0; i < sec.positions.size(); i++) {
-            float green = (sec.positions[i].z() - entity.lower_left.z())
-                        / (entity.upper_right.z() - entity.lower_left.z());
-            col_arr[i] = vec3(1.f, green, 0.f);
+            if (entity_gradient) {
+                float green = (sec.positions[i].z() - entity.lower_left.z())
+                            / (entity.upper_right.z() - entity.lower_left.z());
+                col_arr[i] = vec3(1.f, green, 0.f);
+            } else {
+                col_arr[i] = sec.material.diffuse;
+            }
         }
         entity_secs.back().va->attrib(2)->format(3);
         entity_secs.back().va->attrib(2)->data(col_arr);
     }
 
-    for (obj_section &sec: entity_copy.sections) {
-        // Invert triangle order
-        size_t l = sec.positions.size();
-        assert(!(l % 3) && l == sec.normals.size());
-        // Works with uneven l, too
-        for (size_t i = 0; i < l / 2; i += 3) {
-            for (std::vector<vec3> *vtx: {&sec.positions, &sec.normals}) {
-                for (int j = 0; j < 3; j++) {
-                    vec3 v = (*vtx)[i + j];
-                    (*vtx)[i + j] = (*vtx)[l - i - 3 + j];
-                    (*vtx)[l - i - 3 + j] = v;
+    if (two_objects) {
+        for (obj_section &sec: entity_copy.sections) {
+            // Invert triangle order
+            size_t l = sec.positions.size();
+            assert(!(l % 3) && l == sec.normals.size());
+            // Works with uneven l, too
+            for (size_t i = 0; i < l / 2; i += 3) {
+                for (std::vector<vec3> *vtx: {&sec.positions, &sec.normals}) {
+                    for (int j = 0; j < 3; j++) {
+                        vec3 v = (*vtx)[i + j];
+                        (*vtx)[i + j] = (*vtx)[l - i - 3 + j];
+                        (*vtx)[l - i - 3 + j] = v;
+                    }
                 }
             }
-        }
 
-        entity_secs.emplace_back();
-        entity_secs.back().va = sec.make_vertex_array(0, -1, 1);
-        entity_secs.back().rel_mv = mat4::identity().translated(vec3(2.f, 0.f, 0.f));
+            entity_secs.emplace_back();
+            entity_secs.back().va = sec.make_vertex_array(0, -1, 1);
+            entity_secs.back().rel_mv = mat4::identity().translated(vec3(2.f, 0.f, 0.f));
 
-        vec3 *col_arr = new vec3[sec.positions.size()];
-        for (size_t i = 0; i < sec.positions.size(); i++) {
-            float green = (sec.positions[i].z() - entity.lower_left.z())
-                        / (entity.upper_right.z() - entity.lower_left.z());
-            col_arr[i] = vec3(1.f, green, 0.f);
+            vec3 *col_arr = new vec3[sec.positions.size()];
+            for (size_t i = 0; i < sec.positions.size(); i++) {
+                if (entity_gradient) {
+                    float green = (sec.positions[i].z() - entity.lower_left.z())
+                                / (entity.upper_right.z() - entity.lower_left.z());
+                    col_arr[i] = vec3(1.f, green, 0.f);
+                } else {
+                    col_arr[i] = sec.material.diffuse;
+                }
+            }
+            entity_secs.back().va->attrib(2)->format(3);
+            entity_secs.back().va->attrib(2)->data(col_arr);
         }
-        entity_secs.back().va->attrib(2)->format(3);
-        entity_secs.back().va->attrib(2)->data(col_arr);
     }
 
     std::vector<ObjectSection> quad_secs;
     for (int x: {-1, 1}) {
+        if (!two_objects) {
+            if (x < 0) {
+                x = 0;
+            } else {
+                break;
+            }
+        }
         for (int rl = 0; rl < 3; rl++) {
             int l = x < 0 ? rl : 2 - rl;
 
@@ -588,7 +667,8 @@ int main(int argc, char *argv[])
     mat4 mv = mat4::identity().translated(vec3(0.f, 0.f, -5.f));
     float aspect = static_cast<float>(WIDTH) / HEIGHT;
     //mat4 p = mat4::projection(M_PIf / 32.f, aspect, .1f, 10.f);
-    mat4 p = mat4::orthographic(-4.f, 4.f, 4.f / aspect, -4.f / aspect, 0.f, 10.f);
+    float lr = two_objects ? 4.f : 2.f;
+    mat4 p = mat4::orthographic(-lr, lr, lr / aspect, -lr / aspect, 0.f, 10.f);
 
     std::default_random_engine reng;
     std::uniform_real_distribution<float> dist(-.8f, .8f);
