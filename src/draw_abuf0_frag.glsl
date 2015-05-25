@@ -4,7 +4,7 @@
 #extension GL_ARB_shading_language_packing: require
 
 
-in vec3 vf_pos, vf_col;
+in vec3 vf_col;
 
 out vec4 out_col;
 

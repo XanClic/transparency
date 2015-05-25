@@ -383,6 +383,51 @@ static void blend_bamc(framebuffer &fb_in, framebuffer &fb_bamc,
 }
 
 
+static void adaptive_transp(texture &tex_a, texture &tex_d, texture &tex_l,
+                            const mat4 &mv, const mat4 &proj,
+                            program &col_vis_prg, program &draw_prg,
+                            float alpha,
+                            const std::vector<ObjectSection> &sections,
+                            GLenum draw_mode)
+{
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+
+    glClearTexImage(tex_a.glid(), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    vec4 dc(1.f, 1.f, 1.f, 1.f);
+    glClearTexImage(tex_d.glid(), 0, GL_RGBA, GL_FLOAT, &dc);
+    glClearTexImage(tex_l.glid(), 0, GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
+
+    texture::unbind(tex_a.tmu());
+    texture::unbind(tex_d.tmu());
+
+    glBindImageTexture(0, tex_a.glid(), 0, false, 0, GL_READ_WRITE, GL_RGBA8_SNORM);
+    glBindImageTexture(1, tex_d.glid(), 0, false, 0, GL_READ_WRITE, GL_RGBA16_SNORM);
+    glBindImageTexture(2, tex_l.glid(), 0, false, 0, GL_READ_WRITE, GL_R32UI);
+
+    col_vis_prg.use();
+    col_vis_prg.uniform<int32_t>("alpha_tex") = 0;
+    col_vis_prg.uniform<int32_t>("depth_tex") = 1;
+    col_vis_prg.uniform<int32_t>("lock_tex")  = 2;
+    draw_with_alpha(col_vis_prg, mv, proj, alpha, sections, draw_mode);
+
+    glBindImageTexture(0, 0, 0, false, 0, GL_READ_WRITE, GL_RGBA8_SNORM);
+    glBindImageTexture(1, 0, 0, false, 0, GL_READ_WRITE, GL_RGBA16_SNORM);
+    glBindImageTexture(2, 0, 0, false, 0, GL_READ_WRITE, GL_R32UI);
+
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    tex_a.bind();
+    tex_d.bind();
+    draw_prg.use();
+    draw_prg.uniform<texture>("alpha_tex") = tex_a;
+    draw_prg.uniform<texture>("depth_tex") = tex_d;
+    draw_with_alpha(draw_prg, mv, proj, alpha, sections, draw_mode);
+
+    glDisable(GL_BLEND);
+}
+
+
 int main(int argc, char *argv[])
 {
     const char *bg_tex_name, *entity_name = "entity.obj";
@@ -523,6 +568,8 @@ int main(int argc, char *argv[])
     program draw_bamy0_prg  {shader(shader::FRAGMENT, "draw_bamy0_frag.glsl")};
     program draw_bamc0_prg  {shader(shader::FRAGMENT, "draw_bamc0_frag.glsl")};
     program draw_bamc0w_prg {shader(shader::FRAGMENT, "draw_bamc0w_frag.glsl")};
+    program draw_adtp0_prg  {shader(shader::FRAGMENT, "draw_adtp0_frag.glsl")};
+    program draw_adtp1_prg  {shader(shader::FRAGMENT, "draw_adtp1_frag.glsl")};
 
     program *draw_abuf0_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
@@ -532,7 +579,8 @@ int main(int argc, char *argv[])
     for (program *prg: {&draw_bf_prg, &draw_ff_prg, &draw_dp_prg,
                         &draw_bfdp_prg, &draw_ffdp_prg, &draw_simple_prg,
                         &draw_meshk_prg, &draw_bamy0_prg, &draw_bamc0_prg,
-                        &draw_bamc0w_prg, draw_abuf0_prg})
+                        &draw_bamc0w_prg, &draw_adtp0_prg, &draw_adtp1_prg,
+                        draw_abuf0_prg})
     {
         if (!prg) {
             continue;
@@ -625,8 +673,8 @@ int main(int argc, char *argv[])
                 pos[i] = vec3(quad_vertex_positions[i]);
                 nrm[i] = vec3(0.f, 0.f, 1.f);
                 col[i] = l == 0 ? vec3(1.f, .5f, .5f)
-                                : l == 1 ? vec3(.5f, 1.f, .5f)
-                                :          vec3(.5f, .5f, 1.f);
+                       : l == 1 ? vec3(.5f, 1.f, .5f)
+                       :          vec3(.5f, .5f, 1.f);
             }
 
 
@@ -663,6 +711,12 @@ int main(int argc, char *argv[])
     fb_bamy[1].tmu() = 1;
     fb_bamc[1].tmu() = 1;
 
+    texture adtp_a, adtp_d, adtp_l;
+    adtp_a.format(GL_RGBA8_SNORM, WIDTH, HEIGHT);
+    adtp_d.format(GL_RGBA16_SNORM, WIDTH, HEIGHT);
+    adtp_d.tmu() = 1;
+    adtp_l.format(GL_R32UI, WIDTH, HEIGHT, GL_RED_INTEGER);
+
 
     mat4 mv = mat4::identity().translated(vec3(0.f, 0.f, -5.f));
     float aspect = static_cast<float>(WIDTH) / HEIGHT;
@@ -680,6 +734,7 @@ int main(int argc, char *argv[])
         BLEND_ALPHA,
         BLEND_ALPHA_DP,
         ABUFFER_LL,
+        ADAPTIVE_TRANSPARENCY,
         BLEND_MESHKIN,
         BLEND_BAVOIL_MYER,
         BLEND_BAVOIL_MCGUIRE,
@@ -696,6 +751,7 @@ int main(int argc, char *argv[])
         "plain alpha blending",
         "alpha blending with depth peeling",
         "alpha blending with a A-Buffer (linked list)",
+        "adaptive transparency",
         "Meshkin's blending",
         "Bavoil's and Myer's blending",
         "Bavoil's and McGuire's blending",
@@ -840,6 +896,11 @@ int main(int argc, char *argv[])
                                dp_layer >= 0 ? 1.f : .5f, *cur_obj,
                                cur_draw_mode, quad);
                 }
+                break;
+
+            case ADAPTIVE_TRANSPARENCY:
+                adaptive_transp(adtp_a, adtp_d, adtp_l, mv, p, draw_adtp0_prg,
+                                draw_adtp1_prg, .5f, *cur_obj, cur_draw_mode);
                 break;
 
             case BLEND_MESHKIN:
