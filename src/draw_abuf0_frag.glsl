@@ -9,7 +9,7 @@ in vec3 vf_col;
 out vec4 out_col;
 
 layout (r32ui) uniform coherent uimage2D head;
-layout (rgba32ui) uniform coherent uimage2D list;
+layout (rgba32ui) uniform uimage2D list;
 uniform float alpha;
 layout (offset = 0, binding = 0) uniform atomic_uint counter;
 

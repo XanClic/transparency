@@ -15,6 +15,7 @@
 #include <dake/gl/texture.hpp>
 #include <dake/gl/vertex_array.hpp>
 #include <dake/gl/vertex_attrib.hpp>
+#include <dake/helper/function.hpp>
 #include <dake/math.hpp>
 
 
@@ -22,6 +23,7 @@ static int WIDTH = 1280, HEIGHT = 720;
 
 
 using namespace dake::gl;
+using namespace dake::helper;
 using namespace dake::math;
 
 
@@ -32,7 +34,7 @@ struct ObjectSection {
 
 
 static void ss_refract(framebuffer *fbs, const mat4 &mv, const mat4 &proj,
-                       program &draw_bf_prg, program &draw_ff_prg,
+                      program &draw_bf_prg, program &draw_ff_prg,
                        const std::vector<ObjectSection> &sections,
                        GLenum draw_mode)
 {
@@ -383,7 +385,7 @@ static void blend_bamc(framebuffer &fb_in, framebuffer &fb_bamc,
 }
 
 
-static void adaptive_transp(texture &tex_a, texture &tex_d, texture &tex_l,
+static void adaptive_transp(texture &tex_a, texture &tex_d, texture *tex_l,
                             const mat4 &mv, const mat4 &proj,
                             program &col_vis_prg, program &draw_prg,
                             float alpha,
@@ -396,24 +398,33 @@ static void adaptive_transp(texture &tex_a, texture &tex_d, texture &tex_l,
     glClearTexImage(tex_a.glid(), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     vec4 dc(1.f, 1.f, 1.f, 1.f);
     glClearTexImage(tex_d.glid(), 0, GL_RGBA, GL_FLOAT, &dc);
-    glClearTexImage(tex_l.glid(), 0, GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
+
+    if (tex_l) {
+        glClearTexImage(tex_l->glid(), 0, GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
+    }
 
     texture::unbind(tex_a.tmu());
     texture::unbind(tex_d.tmu());
 
     glBindImageTexture(0, tex_a.glid(), 0, false, 0, GL_READ_WRITE, GL_RGBA8_SNORM);
     glBindImageTexture(1, tex_d.glid(), 0, false, 0, GL_READ_WRITE, GL_RGBA16_SNORM);
-    glBindImageTexture(2, tex_l.glid(), 0, false, 0, GL_READ_WRITE, GL_R32UI);
+    if (tex_l) {
+        glBindImageTexture(2, tex_l->glid(), 0, false, 0, GL_READ_WRITE, GL_R32UI);
+    }
 
     col_vis_prg.use();
     col_vis_prg.uniform<int32_t>("alpha_tex") = 0;
     col_vis_prg.uniform<int32_t>("depth_tex") = 1;
-    col_vis_prg.uniform<int32_t>("lock_tex")  = 2;
+    if (tex_l) {
+        col_vis_prg.uniform<int32_t>("lock_tex")  = 2;
+    }
     draw_with_alpha(col_vis_prg, mv, proj, alpha, sections, draw_mode);
 
     glBindImageTexture(0, 0, 0, false, 0, GL_READ_WRITE, GL_RGBA8_SNORM);
     glBindImageTexture(1, 0, 0, false, 0, GL_READ_WRITE, GL_RGBA16_SNORM);
-    glBindImageTexture(2, 0, 0, false, 0, GL_READ_WRITE, GL_R32UI);
+    if (tex_l) {
+        glBindImageTexture(2, 0, 0, false, 0, GL_READ_WRITE, GL_R32UI);
+    }
 
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
 
@@ -428,10 +439,116 @@ static void adaptive_transp(texture &tex_a, texture &tex_d, texture &tex_l,
 }
 
 
+static void hybrid_transp(framebuffer &fb_hytp, array_texture &abuffer,
+                          const mat4 &mv, const mat4 &proj,
+                          program &col_frag_prg, program &calc_vis_prg,
+                          program &resolv_prg, float alpha,
+                          const std::vector<ObjectSection> &sections,
+                          GLenum draw_mode, vertex_array &quad_va)
+{
+    uint32_t dc = 0xffffff00u; // depth = 1.0; alpha = 0.0
+    glClearTexImage(abuffer.glid(), 0, GL_RED_INTEGER, GL_UNSIGNED_INT, &dc);
+
+    glClearTexImage(fb_hytp[0].glid(), 0, GL_RED, GL_FLOAT, nullptr);
+    float vis_clear = 1.f;
+    glClearTexImage(fb_hytp[1].glid(), 0, GL_RED, GL_FLOAT, &vis_clear);
+
+    array_texture::unbind(abuffer.tmu());
+
+    glBindImageTexture(0, abuffer.glid(), 0, true, 0, GL_READ_WRITE, GL_R32UI);
+
+    fb_hytp.bind();
+
+    glEnable(GL_BLEND);
+    glBlendFunci(0, GL_ONE, GL_ONE);
+    glBlendFunci(1, GL_ZERO, GL_SRC_COLOR);
+
+    col_frag_prg.use();
+    col_frag_prg.uniform<int32_t>("abuffer") = 0;
+    draw_with_alpha(col_frag_prg, mv, proj, alpha, sections, draw_mode);
+
+    framebuffer::unbind();
+    glBlendFunc(GL_ZERO, GL_SRC_ALPHA);
+
+    fb_hytp[1].bind();
+    calc_vis_prg.use();
+    calc_vis_prg.uniform<int32_t>("abuffer") = 0;
+    calc_vis_prg.uniform<texture>("visibility") = fb_hytp[1];
+    quad_va.draw(GL_TRIANGLE_STRIP);
+
+    glBindImageTexture(0, 0, 0, false, 0, GL_READ_ONLY, GL_R32UI);
+
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    abuffer.bind();
+    fb_hytp[0].bind();
+    resolv_prg.use();
+    resolv_prg.uniform<array_texture>("abuffer") = abuffer;
+    resolv_prg.uniform<texture>("alpha_accum") = fb_hytp[0];
+    draw_with_alpha(resolv_prg, mv, proj, alpha, sections, draw_mode);
+
+    glDisable(GL_BLEND);
+}
+
+
+static void abuf_atomic(framebuffer &fb_bamc, array_texture &abuffer0,
+                        array_texture &abuffer1,
+                        const mat4 &mv, const mat4 &proj,
+                        program &col_frag_prg, program &calc_col_prg,
+                        program &resolv_prg, float alpha,
+                        const std::vector<ObjectSection> &sections,
+                        GLenum draw_mode, vertex_array &quad_va)
+{
+    uint32_t dc = 0xffffffffu;
+    glClearTexImage(abuffer0.glid(), 0, GL_RED_INTEGER, GL_UNSIGNED_INT, &dc);
+    glClearTexImage(abuffer1.glid(), 0, GL_RGBA, GL_FLOAT, nullptr);
+
+    array_texture::unbind(abuffer0.tmu());
+    array_texture::unbind(abuffer1.tmu());
+
+    glBindImageTexture(0, abuffer0.glid(), 0, true, 0, GL_READ_WRITE, GL_R32UI);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+
+    col_frag_prg.use();
+    col_frag_prg.uniform<int32_t>("abuffer") = 0;
+    draw_with_alpha(col_frag_prg, mv, proj, alpha, sections, draw_mode);
+
+    glBindImageTexture(0, abuffer1.glid(), 0, true, 0, GL_WRITE_ONLY, GL_RGBA8_SNORM);
+
+    fb_bamc.mask(1);
+    fb_bamc.bind();
+    glBlendFunc(GL_ONE, GL_ONE);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    abuffer0.bind();
+    calc_col_prg.use();
+    calc_col_prg.uniform<int32_t>("colors") = 0;
+    calc_col_prg.uniform<array_texture>("abuffer") = abuffer0;
+    draw_with_alpha(calc_col_prg, mv, proj, alpha, sections, draw_mode);
+
+    framebuffer::unbind();
+
+    glBindImageTexture(0, 0, 0, false, 0, GL_READ_ONLY, GL_R32UI);
+
+    fb_bamc.unmask(1);
+    fb_bamc[0].bind();
+    abuffer1.bind();
+    resolv_prg.use();
+    resolv_prg.uniform<array_texture>("colors") = abuffer1;
+    resolv_prg.uniform<texture>("accum") = fb_bamc[0];
+    quad_va.draw(GL_TRIANGLE_STRIP);
+
+    glDisable(GL_BLEND);
+}
+
+
 int main(int argc, char *argv[])
 {
     const char *bg_tex_name, *entity_name = "entity.obj";
     bool entity_gradient = true, borderless = false, two_objects = true;
+    bool pixel_sync = false, bfcull = false;
 
     static const struct option options[] = {
         {"help", no_argument, nullptr, 'h'},
@@ -439,12 +556,14 @@ int main(int argc, char *argv[])
         {"material", no_argument, nullptr, 'm'},
         {"borderless", no_argument, nullptr, 'b'},
         {"single", no_argument, nullptr, 's'},
+        {"pixel-sync", no_argument, nullptr, 'y'},
+        {"cull-backfaces", no_argument, nullptr, 'c'},
 
         {nullptr, 0, nullptr, 0}
     };
 
     for (;;) {
-        int option = getopt_long(argc, argv, "he:mbs", options, nullptr);
+        int option = getopt_long(argc, argv, "he:mbsyc", options, nullptr);
         if (option == -1) {
             break;
         }
@@ -460,6 +579,9 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "                               instead of generating a gradient\n");
                 fprintf(stderr, "  -b, --borderless             Run borderless in 1920x1080\n");
                 fprintf(stderr, "  -s, --single                 Draw only a single object\n");
+                fprintf(stderr, "  -y, --pixel-sync             Use GL_INTEL_fragment_shader_ordering\n");
+                fprintf(stderr, "                               if available\n");
+                fprintf(stderr, "  -c, --cull-backfraces        Enable backface culling\n");
                 return 0;
 
             case 'e':
@@ -478,6 +600,14 @@ int main(int argc, char *argv[])
 
             case 's':
                 two_objects = false;
+                break;
+
+            case 'y':
+                pixel_sync = true;
+                break;
+
+            case 'c':
+                bfcull = true;
                 break;
         }
     }
@@ -509,6 +639,8 @@ int main(int argc, char *argv[])
 
     glext.init();
 
+    pixel_sync &= glext.has_extension("GL_INTEL_fragment_shader_ordering");
+
 
     texture input(bg_tex_name);
 
@@ -535,17 +667,22 @@ int main(int argc, char *argv[])
     program draw_tex_prg   {shader(shader::FRAGMENT, "draw_tex_frag.glsl")};
     program draw_bamy1_prg {shader(shader::FRAGMENT, "draw_bamy1_frag.glsl")};
     program draw_bamc1_prg {shader(shader::FRAGMENT, "draw_bamc1_frag.glsl")};
+    program draw_baab2_prg {shader(shader::FRAGMENT, "draw_baab2_frag.glsl")};
 
     program *draw_abuf1_prg = nullptr, *draw_abuf1l_prg = nullptr;
+    program *draw_hytp1_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
         draw_abuf1_prg  = new program {shader(shader::FRAGMENT,
                                        "draw_abuf1_frag.glsl")};
         draw_abuf1l_prg = new program {shader(shader::FRAGMENT,
                                        "draw_abuf1l_frag.glsl")};
+        draw_hytp1_prg  = new program {shader(shader::FRAGMENT,
+                                       "draw_hytp1_frag.glsl")};
     }
 
     for (program *prg: {&draw_tex_prg, &draw_bamy1_prg, &draw_bamc1_prg,
-                        draw_abuf1_prg, draw_abuf1l_prg})
+                        draw_abuf1_prg, draw_abuf1l_prg, draw_hytp1_prg,
+                        &draw_baab2_prg})
     {
         if (!prg) {
             continue;
@@ -568,19 +705,37 @@ int main(int argc, char *argv[])
     program draw_bamy0_prg  {shader(shader::FRAGMENT, "draw_bamy0_frag.glsl")};
     program draw_bamc0_prg  {shader(shader::FRAGMENT, "draw_bamc0_frag.glsl")};
     program draw_bamc0w_prg {shader(shader::FRAGMENT, "draw_bamc0w_frag.glsl")};
-    program draw_adtp0_prg  {shader(shader::FRAGMENT, "draw_adtp0_frag.glsl")};
     program draw_adtp1_prg  {shader(shader::FRAGMENT, "draw_adtp1_frag.glsl")};
+    program draw_hytp2_prg  {shader(shader::FRAGMENT, "draw_hytp2_frag.glsl")};
 
-    program *draw_abuf0_prg = nullptr;
+    program *draw_abuf0_prg = nullptr, *draw_adtp0_prg = nullptr;
+    program *draw_hytp0_prg = nullptr, *draw_baab0_prg = nullptr;
+    program *draw_baab1_prg = nullptr;
     if (glext.has_extension("GL_ARB_shader_image_load_store")) {
-        draw_abuf0_prg = new program {shader(shader::FRAGMENT, "draw_abuf0_frag.glsl")};
+        draw_abuf0_prg = new program {shader(shader::FRAGMENT,
+                                      "draw_abuf0_frag.glsl")};
+        draw_hytp0_prg = new program {shader(shader::FRAGMENT,
+                                      "draw_hytp0_frag.glsl")};
+        draw_baab0_prg = new program {shader(shader::FRAGMENT,
+                                      "draw_baab0_frag.glsl")};
+        draw_baab1_prg = new program {shader(shader::FRAGMENT,
+                                      "draw_baab1_frag.glsl")};
+
+        if (pixel_sync) {
+            draw_adtp0_prg = new program {shader(shader::FRAGMENT,
+                                          "draw_adtp0o_frag.glsl")};
+        } else {
+            draw_adtp0_prg = new program {shader(shader::FRAGMENT,
+                                          "draw_adtp0_frag.glsl")};
+        }
     }
 
     for (program *prg: {&draw_bf_prg, &draw_ff_prg, &draw_dp_prg,
                         &draw_bfdp_prg, &draw_ffdp_prg, &draw_simple_prg,
                         &draw_meshk_prg, &draw_bamy0_prg, &draw_bamc0_prg,
-                        &draw_bamc0w_prg, &draw_adtp0_prg, &draw_adtp1_prg,
-                        draw_abuf0_prg})
+                        &draw_bamc0w_prg, draw_adtp0_prg, &draw_adtp1_prg,
+                        draw_abuf0_prg, draw_hytp0_prg, &draw_hytp2_prg,
+                        draw_baab0_prg, draw_baab1_prg})
     {
         if (!prg) {
             continue;
@@ -596,9 +751,18 @@ int main(int argc, char *argv[])
     draw_bamy0_prg.bind_frag("out_count", 1);
     draw_bamc0_prg.bind_frag("out_transp", 1);
     draw_bamc0w_prg.bind_frag("out_transp", 1);
+    if (draw_hytp0_prg) {
+        draw_hytp0_prg->bind_frag("out_transp", 0);
+        draw_hytp0_prg->bind_frag("out_vis", 1);
+    }
 
     obj entity = load_obj(entity_name), entity_copy = entity;
     std::vector<ObjectSection> entity_secs;
+    vec3 ur = entity.upper_right, ll = entity.lower_left;
+    float scale = 1.5f / maximum(
+                            maximum(fabsf(ur.x()), maximum(fabsf(ur.y()), fabsf(ur.z()))),
+                            maximum(fabsf(ll.x()), maximum(fabsf(ll.y()), fabsf(ll.z())))
+                        );
     for (obj_section &sec: entity.sections) {
         entity_secs.emplace_back();
         entity_secs.back().va = sec.make_vertex_array(0, -1, 1);
@@ -606,6 +770,7 @@ int main(int argc, char *argv[])
         if (two_objects) {
             entity_secs.back().rel_mv.translate(vec3(-2.f, 0.f, 0.f));
         }
+        entity_secs.back().rel_mv.scale(vec3(scale, scale, scale));
 
         vec3 *col_arr = new vec3[sec.positions.size()];
         for (size_t i = 0; i < sec.positions.size(); i++) {
@@ -640,6 +805,7 @@ int main(int argc, char *argv[])
             entity_secs.emplace_back();
             entity_secs.back().va = sec.make_vertex_array(0, -1, 1);
             entity_secs.back().rel_mv = mat4::identity().translated(vec3(2.f, 0.f, 0.f));
+            entity_secs.back().rel_mv.scale(vec3(scale, scale, scale));
 
             vec3 *col_arr = new vec3[sec.positions.size()];
             for (size_t i = 0; i < sec.positions.size(); i++) {
@@ -696,26 +862,39 @@ int main(int argc, char *argv[])
         framebuffer(1),
         framebuffer(1)
     };
-    framebuffer fb_bamy(2, GL_RGB16F), fb_bamc(2);
+    framebuffer fb_bamy(2, GL_RGB16F), fb_bamc(2), fb_hytp(2);
 
     fb_bamc.color_format(0, GL_RGBA16F);
     fb_bamc.color_format(1, GL_RED);
+
+    fb_hytp.color_format(0, GL_R16F);
+    fb_hytp.color_format(1, GL_R8_SNORM);
 
     fbs[0].resize(WIDTH, HEIGHT);
     fbs[1].resize(WIDTH, HEIGHT);
     fb_bamy.resize(WIDTH, HEIGHT);
     fb_bamc.resize(WIDTH, HEIGHT);
+    fb_hytp.resize(WIDTH, HEIGHT);
 
     fbs[0].depth().tmu() = 1;
     fbs[1].depth().tmu() = 1;
     fb_bamy[1].tmu() = 1;
     fb_bamc[1].tmu() = 1;
+    fb_hytp[0].tmu() = 1;
 
-    texture adtp_a, adtp_d, adtp_l;
+    texture adtp_a, adtp_d, *adtp_l = nullptr;
     adtp_a.format(GL_RGBA8_SNORM, WIDTH, HEIGHT);
     adtp_d.format(GL_RGBA16_SNORM, WIDTH, HEIGHT);
     adtp_d.tmu() = 1;
-    adtp_l.format(GL_R32UI, WIDTH, HEIGHT, GL_RED_INTEGER);
+    if (!pixel_sync) {
+        adtp_l = new texture;
+        adtp_l->format(GL_R32UI, WIDTH, HEIGHT, GL_RED_INTEGER);
+    }
+
+    array_texture hytp, baab;
+    hytp.format(GL_R32UI, WIDTH, HEIGHT, 4, GL_RED_INTEGER);
+    baab.format(GL_RGBA8_SNORM, WIDTH, HEIGHT, 4);
+    baab.tmu() = 1;
 
 
     mat4 mv = mat4::identity().translated(vec3(0.f, 0.f, -5.f));
@@ -734,6 +913,8 @@ int main(int argc, char *argv[])
         BLEND_ALPHA,
         BLEND_ALPHA_DP,
         ABUFFER_LL,
+        BOUNDED_ATOMIC_ABUFFER,
+        HYBRID_TRANSPARENCY,
         ADAPTIVE_TRANSPARENCY,
         BLEND_MESHKIN,
         BLEND_BAVOIL_MYER,
@@ -750,7 +931,9 @@ int main(int argc, char *argv[])
     const char *mode_str[] = {
         "plain alpha blending",
         "alpha blending with depth peeling",
-        "alpha blending with a A-Buffer (linked list)",
+        "alpha blending with an A-buffer (linked list)",
+        "alpha blending with an A-buffer (atomics, bounded)",
+        "hybrid transparency",
         "adaptive transparency",
         "Meshkin's blending",
         "Bavoil's and Myer's blending",
@@ -822,7 +1005,7 @@ int main(int argc, char *argv[])
 
                 if (dp_layer >=
                        (mode == BLEND_ALPHA_DP ? 8
-                      : mode == ABUFFER_LL     ? 8
+                      : mode == ABUFFER_LL     ? 32
                       : mode == SS_REFRACT_DP  ? 4
                       : 0))
                 {
@@ -852,6 +1035,10 @@ int main(int argc, char *argv[])
             fbs[0].bind();
         } else {
             framebuffer::unbind();
+        }
+
+        if (bfcull) {
+            glEnable(GL_CULL_FACE);
         }
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -898,9 +1085,28 @@ int main(int argc, char *argv[])
                 }
                 break;
 
+            case BOUNDED_ATOMIC_ABUFFER:
+                if (draw_baab0_prg && draw_baab1_prg) {
+                    abuf_atomic(fb_bamc, hytp, baab, mv, p, *draw_baab0_prg,
+                                *draw_baab1_prg, draw_baab2_prg, .5f, *cur_obj,
+                                cur_draw_mode, quad);
+                }
+                break;
+
+            case HYBRID_TRANSPARENCY:
+                if (draw_hytp0_prg && draw_hytp1_prg) {
+                    hybrid_transp(fb_hytp, hytp, mv, p, *draw_hytp0_prg,
+                                  *draw_hytp1_prg, draw_hytp2_prg, .5f,
+                                  *cur_obj, cur_draw_mode, quad);
+                }
+                break;
+
             case ADAPTIVE_TRANSPARENCY:
-                adaptive_transp(adtp_a, adtp_d, adtp_l, mv, p, draw_adtp0_prg,
-                                draw_adtp1_prg, .5f, *cur_obj, cur_draw_mode);
+                if (draw_adtp0_prg) {
+                    adaptive_transp(adtp_a, adtp_d, adtp_l, mv, p,
+                                    *draw_adtp0_prg, draw_adtp1_prg, .5f,
+                                    *cur_obj, cur_draw_mode);
+                }
                 break;
 
             case BLEND_MESHKIN:
