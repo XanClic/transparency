@@ -13,7 +13,7 @@ uniform int layer;
 #define LW 2048
 #define LH 2048
 
-#define K 8
+#define K 32
 
 
 void main(void)
